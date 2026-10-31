@@ -45,8 +45,8 @@ Turn what the conversation has established into one image prompt, render it with
    ```
 
    It prints the path of the PNG it saved. It takes from a few seconds to a few minutes (the model's description
-   gives its time); meanwhile mako has the chat model unloaded, and this conversation continues as before once it is
-   back.
+   gives its time); when the image server shares the Mac with mako (`--llm`), mako has the chat model unloaded
+   meanwhile, and this conversation continues as before once it is back.
 4. The script opens the image in the Mac's image viewer. Reply with its path and the prompt used, in a line or two.
    Do not `read` the image unless the user wants to talk about what is in it (it then goes to the model as image
    input, which needs mako started with `--mmproj`). If the user wants changes, adjust the prompt and render again.
@@ -144,5 +144,5 @@ uses unless told otherwise, at the scale shown.
 - A render with other LoRAs than the previous one first reloads the image model (a few seconds more). LoRAs do not
   carry over to another model: list the new model's and choose again.
 
-If a script fails, report its message: mako may not be running, may have no image models (`--image-models`), may
-need an API key (`MAKO_API_KEY`), or may not have a model or LoRA of that name (list them again).
+If a script fails, report its message: mako_image_serve may not be running (or not at `MAKO_IMAGE_URL`), may need an
+API key (`MAKO_IMAGE_API_KEY`), or may not have a model or LoRA of that name (list them again).

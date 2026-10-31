@@ -4,6 +4,8 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace mako::server {
@@ -32,5 +34,27 @@ ImageModel load_image_model(const std::string& dir, const std::string& name);
 // The subdirectories of `root` that hold a model or a mako.json, by name (read now); ones that fail to load are left
 // out with a warning.
 std::vector<ImageModel> image_models(const std::string& root);
+
+// An image LoRA a request can name: its file name without .safetensors, its path, and for one given at start-up the
+// scale it is merged at by default.
+struct LoraChoice {
+    std::string name, path;
+    std::optional<float> scale;
+};
+// The start-up LoRAs (in their order), then the .safetensors files in `dir` by name (read now; empty: none). A
+// start-up LoRA's name wins over a file of the same name in `dir`.
+std::vector<LoraChoice> lora_choices(const image::Loras& defaults, const std::string& dir);
+// What a LoRA is for: its trigger (words a prompt needs for it to act), a description and the scales it is meant for.
+// Each from NAME.json beside the file ({"trigger", "description", "scale_range": [low, high]}), else the trigger and
+// description from the file's metadata (trigger_word or modelspec.trigger_phrase; modelspec.description); empty when
+// neither has it.
+struct LoraNotes {
+    std::string trigger, description;
+    std::optional<std::pair<float, float>> scale_range;
+};
+LoraNotes lora_notes(const std::string& path);
+// A request's "loras" value (JSON: an array of {"name" (with or without .safetensors), "scale" (default 1)}) as files
+// and scales. Throws std::invalid_argument naming the problem.
+image::Loras resolve_loras(std::string_view json, const std::vector<LoraChoice>& choices);
 
 } // namespace mako::server

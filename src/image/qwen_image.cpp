@@ -1,6 +1,6 @@
 #include "image/qwen_image.hpp"
 
-#include "core/log.hpp"
+#include "log/log.hpp"
 
 #include <cmath>
 #include <cstdio>

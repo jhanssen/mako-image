@@ -1,6 +1,6 @@
 #include "image/anima.hpp"
 
-#include "core/log.hpp"
+#include "log/log.hpp"
 #include "gguf/read_pool.hpp"
 
 #include <algorithm>

@@ -1,19 +1,22 @@
 // Text to image with Qwen-Image 2.1, Krea 2, MOSS-Image or Anima from their original files.
 //   mako_image <model dir> <prompt> [-o out.png] [--width N] [--height N] [--steps N] [--seed N] [--count N] [--rgb]
 //              [--lora FILE[:SCALE] ...] [--terminal F] [--text-encoder DIR] [--transformer PATH]
-//              [--negative TEXT] [--guidance F]
+//              [--negative TEXT] [--guidance F] [--llm URL] [--llm-api-key KEY]
 // --lora merges a LoRA into the weights (repeatable; SCALE its strength, default 1). --terminal: the schedule's last
 // noise level (0: not stretched there, as distilled few-step LoRAs are trained; default: the model's).
 // --text-encoder: another directory of the text encoder's weights (e.g. a refusal-ablated one; default: the model's).
 // --transformer: another file or directory of the transformer's weights (e.g. a checkpoint with LoRAs merged).
 // --negative: what the image should not be (classifier-free guidance: twice the transformer's work a step);
 // --guidance its scale (default: the model's).
+// --llm: a mako_serve on this machine whose memory to borrow while the model is loaded (it unloads its LLM meanwhile).
 #include "app/cli.hpp"
-#include "core/log.hpp"
-#include "core/telemetry.hpp"
 #include "image/engine.hpp"
 #include "image/png.hpp"
+#include "log/log.hpp"
+#include "memory/borrower.hpp"
 #include "mtl/context.hpp"
+
+#include <Foundation/Foundation.hpp>
 
 #include <chrono>
 #include <filesystem>
@@ -23,8 +26,28 @@
 #include <utility>
 #include <vector>
 
+namespace {
+
+std::string thermal_state()
+{
+    switch (NS::ProcessInfo::processInfo()->thermalState()) {
+    case NS::ProcessInfoThermalStateNominal:
+        return "nominal";
+    case NS::ProcessInfoThermalStateFair:
+        return "fair";
+    case NS::ProcessInfoThermalStateSerious:
+        return "serious";
+    case NS::ProcessInfoThermalStateCritical:
+        return "critical";
+    }
+    return "unknown";
+}
+
+} // namespace
+
 int main(int argc, char** argv)
 {
+    std::string llm, llm_key;
     std::string out = "image.png";
     uint32_t width = 1024, height = 1024, steps = 0;
     uint64_t seed = 0;
@@ -52,12 +75,22 @@ int main(int argc, char** argv)
                 "the guidance scale, with --negative or a model guided by default (default: the model's)",
                 [&](const std::string& v) { guidance = mako::app::Cli::parse<float>(v); })
         .option("--terminal", "F", "the schedule's last noise level (0: none)",
-                [&](const std::string& v) { terminal = mako::app::Cli::parse<float>(v); });
+                [&](const std::string& v) { terminal = mako::app::Cli::parse<float>(v); })
+        .option("--llm", "URL", "a mako_serve on this machine to borrow memory from", llm)
+        .option("--llm-api-key", "KEY", "the key that mako_serve wants", llm_key)
+        .secret();
+    cli.env_prefix("MAKO_IMAGE_");
     const auto pos = cli.parse(argc, argv);
     using Clock = std::chrono::steady_clock;
     auto ms_since = [](Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); };
     try {
         const auto t_load = Clock::now();
+        std::optional<mako::memory::Borrower> borrower; // the LLM's memory, given back on the way out
+        if (!llm.empty()) {
+            borrower.emplace(llm, llm_key, "mako_image");
+            borrower->acquire();
+            mako::log::info("the LLM's memory is free ({:.1f} s)", ms_since(t_load) / 1e3);
+        }
         mako::mtl::Context ctx;
         auto model = mako::image::Engine::open(pos[0], ctx, {text_encoder, transformer});
         auto& engine = *model;
@@ -77,7 +110,7 @@ int main(int argc, char** argv)
             auto t_step = Clock::now();
             r.progress = [&](uint32_t i, uint32_t total) {
                 mako::log::info("step {} of {}: {:.0f} ms, thermal {}", i, total, ms_since(t_step),
-                                mako::core::thermal_state());
+                                thermal_state());
                 t_step = Clock::now();
             };
             const auto t0 = Clock::now();

@@ -1,6 +1,6 @@
 #include "image/krea2.hpp"
 
-#include "core/log.hpp"
+#include "log/log.hpp"
 
 #include <glaze/glaze.hpp>
 

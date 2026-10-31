@@ -1,6 +1,6 @@
 #include "image/moss_image.hpp"
 
-#include "core/log.hpp"
+#include "log/log.hpp"
 
 #include <algorithm>
 #include <cmath>

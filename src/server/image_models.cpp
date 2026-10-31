@@ -1,14 +1,17 @@
 #include "server/image_models.hpp"
 
-#include "core/log.hpp"
+#include "log/log.hpp"
+#include "safetensors/safetensors.hpp"
 
 #include <glaze/glaze.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <format>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <stdexcept>
 
 namespace mako::server {
@@ -127,5 +130,104 @@ std::vector<ImageModel> image_models(const std::string& root)
     }
     return out;
 }
+
+std::vector<LoraChoice> lora_choices(const image::Loras& defaults, const std::string& dir)
+{
+    namespace fs = std::filesystem;
+    std::vector<LoraChoice> out;
+    auto known = [&](const std::string& name) { return std::ranges::contains(out, name, &LoraChoice::name); };
+    for (const auto& [path, scale] : defaults) {
+        const std::string name = fs::path(path).stem().string();
+        if (!known(name))
+            out.push_back({name, path, scale});
+    }
+    if (dir.empty())
+        return out;
+    std::vector<fs::path> files;
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator(dir, ec))
+        if (e.path().extension() == ".safetensors" && e.is_regular_file(ec))
+            files.push_back(e.path());
+    std::ranges::sort(files);
+    for (const auto& f : files)
+        if (!known(f.stem().string()))
+            out.push_back({f.stem().string(), f.string(), std::nullopt});
+    return out;
+}
+
+LoraNotes lora_notes(const std::string& path)
+{
+    LoraNotes n;
+    const auto sidecar = std::filesystem::path(path).replace_extension(".json");
+    if (std::ifstream in(sidecar); in) {
+        const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        glz::generic v;
+        if (glz::read_json(v, text) || !v.is_object()) {
+            log::warn("{}: not a JSON object; its notes left out", sidecar.string());
+        } else {
+            if (v.contains("trigger") && v["trigger"].is_string())
+                n.trigger = v["trigger"].get_string();
+            if (v.contains("description") && v["description"].is_string())
+                n.description = v["description"].get_string();
+            if (v.contains("scale_range")) {
+                auto& r = v["scale_range"];
+                if (r.is_array() && r.get_array().size() == 2 && r[0].is_number() && r[1].is_number() &&
+                    r[0].get_number() <= r[1].get_number())
+                    n.scale_range = {float(r[0].get_number()), float(r[1].get_number())};
+                else
+                    log::warn("{}: scale_range is not [low, high]; left out", sidecar.string());
+            }
+        }
+    }
+    if (!n.trigger.empty() && !n.description.empty())
+        return n;
+    auto f = safetensors::File::open(path);
+    if (!f)
+        return n;
+    const auto& m = f->metadata();
+    auto first = [&](std::initializer_list<const char*> keys) -> std::string {
+        for (const char* k : keys)
+            if (auto it = m.find(k); it != m.end() && !it->second.empty())
+                return it->second;
+        return {};
+    };
+    if (n.trigger.empty())
+        n.trigger = first({"trigger_word", "modelspec.trigger_phrase"});
+    if (n.description.empty())
+        n.description = first({"modelspec.description"});
+    return n;
+}
+
+image::Loras resolve_loras(std::string_view json, const std::vector<LoraChoice>& choices)
+{
+    glz::generic v;
+    if (glz::read_json(v, json) || !v.is_array())
+        throw std::invalid_argument("an array of {\"name\", \"scale\"} objects");
+    image::Loras out;
+    std::vector<std::string> names;
+    for (auto& e : v.get_array()) {
+        if (!e.is_object() || !e.contains("name") || !e["name"].is_string())
+            throw std::invalid_argument("each entry needs a \"name\"");
+        std::string name = e["name"].get_string();
+        if (name.ends_with(".safetensors"))
+            name.resize(name.size() - std::string_view(".safetensors").size());
+        const auto it = std::ranges::find(choices, name, &LoraChoice::name);
+        if (it == choices.end())
+            throw std::invalid_argument(std::format("no LoRA named \"{}\" (GET /v1/images/loras lists them)", name));
+        if (std::ranges::contains(names, name))
+            throw std::invalid_argument(std::format("\"{}\" named twice", name));
+        float scale = 1.0f;
+        if (e.contains("scale") && !e["scale"].is_null()) {
+            if (!e["scale"].is_number() || !std::isfinite(e["scale"].get_number()) ||
+                std::abs(e["scale"].get_number()) > 10)
+                throw std::invalid_argument(std::format("\"{}\": scale must be a number from -10 to 10", name));
+            scale = float(e["scale"].get_number());
+        }
+        names.push_back(name);
+        out.emplace_back(it->path, scale);
+    }
+    return out;
+}
+
 
 } // namespace mako::server

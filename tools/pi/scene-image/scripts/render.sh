@@ -6,8 +6,9 @@
 # --model renders with that image model (default: the server's); --lora (repeatable) with these LoRAs in place of the
 # model's defaults; --no-loras with none; --steps N denoising steps (0: the model's own count; default: the model's
 # setting).
-# MAKO_URL (default http://127.0.0.1:8080/v1), MAKO_API_KEY (when the server wants one), MAKO_IMAGE_DIR (default
-# ~/Pictures/mako), MAKO_IMAGE_OPEN=0 (not opened in the image viewer). Prints the saved file's path.
+# MAKO_IMAGE_URL (mako_image_serve; default http://127.0.0.1:8081/v1), MAKO_IMAGE_API_KEY (when the server wants
+# one), MAKO_IMAGE_DIR (default ~/Pictures/mako), MAKO_IMAGE_OPEN=0 (not opened in the image viewer). Prints the saved
+# file's path.
 set -eu
 usage() {
     echo "usage: render.sh [--model NAME] [--lora NAME[:SCALE]]... [--no-loras] [--steps N] WIDTHxHEIGHT \"prompt\"" >&2
@@ -60,7 +61,7 @@ else
     size=$1
     prompt=$2
 fi
-url=${MAKO_URL:-http://127.0.0.1:8080/v1}
+url=${MAKO_IMAGE_URL:-http://127.0.0.1:8081/v1}
 dir=${MAKO_IMAGE_DIR:-$HOME/Pictures/mako}
 mkdir -p "$dir"
 base="$dir/$(date +%Y%m%d-%H%M%S)"
@@ -86,7 +87,7 @@ if os.environ["LORAS"]:
             b["loras"].append({"name": spec})
 print(json.dumps(b))')
 status=$(curl -sS -o "$tmp" -w '%{http_code}' --max-time 1800 "$url/images/generations" \
-    -H 'Content-Type: application/json' ${MAKO_API_KEY:+-H "Authorization: Bearer $MAKO_API_KEY"} -d "$body")
+    -H 'Content-Type: application/json' ${MAKO_IMAGE_API_KEY:+-H "Authorization: Bearer $MAKO_IMAGE_API_KEY"} -d "$body")
 out=$(BASE=$base STATUS=$status python3 - "$tmp" <<'PY'
 import base64, json, os, sys
 try:

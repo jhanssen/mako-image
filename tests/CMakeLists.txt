@@ -1,0 +1,49 @@
+# ctest -L cpu: no GPU and no model (what CI runs); -L image: the models against their references.
+add_executable(safetensors_test safetensors_test.cpp)
+target_link_libraries(safetensors_test PRIVATE mako_safetensors)
+add_test(NAME safetensors COMMAND safetensors_test "${MAKO_QWEN_IMAGE}")
+set_tests_properties(safetensors PROPERTIES LABELS image SKIP_RETURN_CODE 77)
+# Krea 2 against the reference pipeline's tensors (MAKO_KREA2_REF).
+add_executable(krea_ref_test krea_ref_test.cpp)
+target_link_libraries(krea_ref_test PRIVATE mako_imagegen mako_text glaze_headers)
+foreach(m tokens text dit vae pipeline)
+    add_test(NAME krea_${m} COMMAND krea_ref_test "${MAKO_KREA2}" "${MAKO_KREA2_TRANSFORMER}" "${MAKO_KREA2_REF}" ${m})
+    set_tests_properties(krea_${m} PROPERTIES LABELS image SKIP_RETURN_CODE 77)
+endforeach()
+# Anima against the reference implementation's tensors (MAKO_ANIMA_REF).
+add_executable(anima_ref_test anima_ref_test.cpp)
+target_link_libraries(anima_ref_test PRIVATE mako_imagegen mako_text glaze_headers)
+foreach(m tokens text adapter dit vae pipeline)
+    add_test(NAME anima_${m} COMMAND anima_ref_test "${MAKO_ANIMA}" "${MAKO_ANIMA_TRANSFORMER}" "${MAKO_ANIMA_REF}" ${m})
+    set_tests_properties(anima_${m} PROPERTIES LABELS image SKIP_RETURN_CODE 77)
+endforeach()
+# The unigram tokenizer (T5's) against the reference tokenizer's ids (MAKO_T5_TOKENIZER: its tokenizer.json).
+add_executable(unigram_test unigram_test.cpp)
+target_link_libraries(unigram_test PRIVATE mako_text glaze_headers)
+target_compile_definitions(unigram_test PRIVATE MAKO_TEST_DATA="${CMAKE_CURRENT_SOURCE_DIR}/data")
+add_test(NAME unigram COMMAND unigram_test "${MAKO_T5_TOKENIZER}")
+set_tests_properties(unigram PROPERTIES LABELS image SKIP_RETURN_CODE 77)
+# MOSS-Image against the reference pipeline's tensors (MAKO_MOSS_REF).
+add_executable(moss_ref_test moss_ref_test.cpp)
+target_link_libraries(moss_ref_test PRIVATE mako_imagegen mako_text glaze_headers)
+foreach(m tokens text dit vae pipeline)
+    add_test(NAME moss_${m} COMMAND moss_ref_test "${MAKO_MOSS}" "${MAKO_MOSS_REF}" ${m})
+    set_tests_properties(moss_${m} PROPERTIES LABELS image SKIP_RETURN_CODE 77)
+endforeach()
+# Qwen-Image 2.1 against the reference pipeline's tensors (MAKO_QWEN_IMAGE_REF).
+add_executable(image_ref_test image_ref_test.cpp)
+target_link_libraries(image_ref_test PRIVATE mako_imagegen mako_text glaze_headers)
+foreach(m tokens text dit vae pipeline)
+    add_test(NAME image_${m} COMMAND image_ref_test "${MAKO_QWEN_IMAGE}" "${MAKO_QWEN_IMAGE_REF}" ${m})
+    set_tests_properties(image_${m} PROPERTIES LABELS image SKIP_RETURN_CODE 77)
+endforeach()
+
+# The model in memory against a lender on loopback (a stand-in model; no GPU).
+add_executable(residency_test residency_test.cpp)
+target_link_libraries(residency_test PRIVATE mako_image_server httplib_headers)
+add_test(NAME residency COMMAND residency_test)
+# The HTTP server's checks and errors, without a model.
+add_executable(image_server_test image_server_test.cpp)
+target_link_libraries(image_server_test PRIVATE mako_image_server httplib_headers)
+add_test(NAME image_server COMMAND image_server_test)
+set_tests_properties(residency image_server PROPERTIES LABELS cpu)
