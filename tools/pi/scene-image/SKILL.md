@@ -147,4 +147,7 @@ uses unless told otherwise, at the scale shown.
   carry over to another model: list the new model's and choose again.
 
 If a script fails, report its message: mako_image_serve may not be running (or not at `MAKO_IMAGE_URL`), may need an
-API key (`MAKO_IMAGE_API_KEY`), or may not have a model or LoRA of that name (list them again).
+API key (`MAKO_IMAGE_API_KEY`), or may not have a model or LoRA of that name (list them again). A message starting
+"borrowing memory:" means the image server, started with `--llm URL` to share the Mac with mako_serve, could not
+reach mako_serve there (not running, another port, or it wants `--llm-api-key`); the user fixes that where the image
+server is started.
