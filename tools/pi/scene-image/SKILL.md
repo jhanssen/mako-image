@@ -44,7 +44,7 @@ Turn what the conversation has established into one image prompt, render it with
    scripts/render.sh --model MODEL WIDTHxHEIGHT "<the prompt>"
    ```
 
-   It prints the path of the PNG it saved. It takes from a few seconds to a few minutes (the model's description
+   (Its options are under "Options".) It prints the path of the PNG it saved. It takes from a few seconds to a few minutes (the model's description
    gives its time). When the image server shares the Mac with the chat model's mako_serve (`--llm`), the chat model is
    unloaded while the image model is loaded; the next message loads it again (~10 s), and this conversation
    continues as before.
@@ -145,6 +145,22 @@ uses unless told otherwise, at the scale shown.
   its effect does not show.
 - A render with other LoRAs than the previous one first reloads the image model (a few seconds more). LoRAs do not
   carry over to another model: list the new model's and choose again.
+
+## Options
+
+`scripts/render.sh [options] WIDTHxHEIGHT "<prompt>"`, or `scripts/render.sh [options] --layout DRAFT`:
+
+- `--model NAME`: the image model (default: the server's default).
+- `--lora NAME[:SCALE]` (repeatable): exactly these LoRAs in place of the model's defaults; `--no-loras`: none (see
+  "LoRAs").
+- `--steps N`: denoising steps, 0 to 100; 0 is the model's own count; without it the step count the server set for the
+  model applies (lower with a speed LoRA). More steps take longer. Leave it out unless the user asks for more or fewer
+  steps, or the speed LoRA a model's low step count is set for is gone.
+- `--layout DRAFT`: a MOSS-Image layout in place of size and prompt (see "Layouts").
+
+The environment, set by the user: `MAKO_IMAGE_URL` and `MAKO_IMAGE_API_KEY` (the server), `MAKO_IMAGE_DIR` (where
+images are saved, default `~/Pictures/mako`), `MAKO_IMAGE_OPEN=0` (do not open the image viewer). `scripts/models.sh`
+takes no options; `scripts/loras.sh [MODEL]` lists the server's default model's LoRAs without one.
 
 If a script fails, report its message: mako_image_serve may not be running (or not at `MAKO_IMAGE_URL`), may need an
 API key (`MAKO_IMAGE_API_KEY`), or may not have a model or LoRA of that name (list them again). A message starting
