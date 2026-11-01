@@ -8,35 +8,7 @@ description: Render a picture of the current scene, character, place or moment f
 Turn what the conversation has established into one image prompt, render it with mako_image_serve, and show the result.
 
 0. Pick the image model (see "Models" below) unless one is already in use in this conversation.
-1. Write one image prompt in English, 100-300 words, from the conversation so far, in full descriptive sentences
-   rather than a list of keywords (the image models' text encoders are language models and read prose best; a
-   model whose description says it takes tags can have tags in front of the sentences). The image model knows only
-   what the prompt says: anything left out is filled in by guess, usually with the most generic choice. Spell every
-   detail out, concretely and literally, even ones that seem obvious from the story:
-   - the subjects: who or what, how many, and every visual detail the story has fixed (age, build, height, hair
-     length, style and colour, eye colour, skin, face, clothing piece by piece with its colour, fit and state,
-     accessories, objects held), the same words each time so characters stay recognisable across images;
-   - exactly where each subject is and what each part of the body is doing: standing, sitting or lying, which way
-     they face, where the hands and arms are, where they look, the expression; with several subjects, see
-     "Placing several subjects" below;
-   - what is visible and what is not: which parts of the subjects are in frame, what is in front of or behind them,
-     what fills the foreground and the background;
-   - the setting in particular things (not "a room" but the room's walls, floor, furniture, light sources), the time
-     of day and the weather;
-   - the composition and camera (wide shot, close-up, viewpoint, height, lens), the lighting (direction, colour,
-     hardness) and the mood;
-   - the art style the user has asked for in this session; otherwise one that suits the material, stated plainly
-     ("oil painting", "cinematic photograph", "watercolour", "editorial photography", ...);
-   - no text or lettering in the image unless the user wants it; no list of things to avoid (the prompt describes
-     what is there; things to keep out go in `--negative`, see "Options").
-   Do not summarize or soften what the user asked for: an abstraction ("an intimate moment", "a dramatic scene", "a
-   fantasy outfit") gives a generic image; say what is actually seen instead. Do not leave out a detail because it
-   was mentioned long ago or seems implied; if the user describes something, it belongs in the prompt in their
-   terms. Say plainly what the image should show; vague or hedged wording gives vaguer images.
-   If the user asked for something specific ("the tavern from the first chapter", "portrait of the captain"), use
-   every detail the conversation gives for it and leave out what does not belong to it. If the user says an image
-   came out wrong, find which detail the prompt left vague or missing, write it out more explicitly, and keep the
-   rest of the prompt the same.
+1. Write the prompt as "Writing the prompt" below says.
 2. Pick a size: 1024x1024, or 1344x768 for a landscape or wide scene, 768x1344 for a standing figure or tall scene
    (each side a multiple of 32).
 3. Run, from this skill's directory:
@@ -51,31 +23,69 @@ Turn what the conversation has established into one image prompt, render it with
    (~10 s), and this conversation continues as before.
 4. The script opens the image in the Mac's image viewer. Reply with its path and the prompt used, in a line or two.
    Do not `read` the image unless the user wants to talk about what is in it (it then goes to the model as image
-   input, which needs the chat model's mako_serve started with `--mmproj`). If the user wants changes, adjust the
-   prompt and render again.
+   input, which needs the chat model's mako_serve started with `--mmproj`). If the user wants changes, revise the
+   prompt as "Revising" says and render again.
 
-## Placing several subjects
+## Writing the prompt
 
-Image models lose track of who is where unless the prompt pins it down. With two or more people (or animals,
-figures):
+The image model knows only what the prompt says and fills the rest with its most common choice. Its text encoder is a
+language model, so write English sentences, not keyword lists (a model whose prompting notes say it takes tags can
+have them in front). It binds words to subjects loosely: every mention of a person, every "he" or "she" and every
+named body part is one more chance to attach something to the wrong body, draw a person twice or put a limb in the
+wrong place. A good prompt says each thing once, in one place, and nothing the image cannot show.
 
-- Give each a fixed handle used every time ("the tall woman", "the man in the grey coat"), never "he", "she" or
-  "they" where it could mean either.
-- One subject per sentence, starting with where it is in the frame from the camera's point of view: "On the left
-  of the frame, the tall woman ...", "In the right half, the man in the grey coat ...", "In the foreground ...",
-  "Behind her ...". Say left and right as the viewer sees them, never the subject's own left or right without
-  saying so.
-- State the arrangement in plain geometry: side by side, one behind the other, one above the other, how far apart,
-  who is higher or lower (standing, kneeling, sitting, lying), and which way each faces (toward the camera, away
-  from it, toward each other, in profile).
-- For every point of contact, name both body parts and both subjects: "the tall woman's right hand rests on the
-  man's left shoulder", "his back is against her chest", "their foreheads touch". Contact the prompt does not
-  state is left to chance.
-- Say what of each subject is in frame and what is hidden behind the other.
-- Then one sentence on the scene as a whole that repeats the arrangement in brief ("the two face each other across
-  the table, the woman on the left, the man on the right").
-- With a model that takes layouts (its prompting notes say so), give each subject its own box instead (see
-  "Layouts").
+Build it in this order:
+
+1. Medium and arrangement, in one or two sentences: the style (the one the user asked for in this session, else one
+   that suits the material: "a cinematic photograph", "a watercolour"), how many people when more than one ("two
+   people: a man and a woman"), and where each is in what pose, by the pose's name ("she sits on the bench, he stands
+   behind it").
+2. One block per subject, all of it together: a fixed handle ("the tall woman", "the man in the grey coat"), then what
+   the story has fixed about how it looks (age, build, hair, face, clothing piece by piece with colour and state,
+   things held), then what the arrangement leaves open (hands, gaze, expression). Inside its own block "he" or "she"
+   is clear; elsewhere use the handle. Use the same words for a character in every image. At most one clause on
+   contact with another subject, in the block of the one doing it ("her hand on the man's shoulder").
+3. The setting in particular things (walls, floor, furniture, light sources), the time of day, the weather.
+4. The camera and light: the shot (wide, medium, close-up), viewpoint and height, the light's direction and colour,
+   the mood.
+
+Rules:
+
+- Concrete and literal: say what is seen, not an abstraction ("an intimate moment", "a fantasy outfit"). Use the
+  user's terms and everything the conversation fixed for what is shown, however long ago; leave out what does not
+  belong in this image; do not soften or summarize what the user asked for.
+- Each fact once: restating it in other words ("on her back, chest up, back on the table, torso flat") adds
+  references, not weight.
+- Say what is there, not what is not: "not sitting up" or "no hat" tends to put the thing in the image. What must
+  stay out goes in `--negative` (see "Options"). No text or lettering unless the user wants it.
+- Only what this camera sees: from behind a person, their face and the hands in front of them are hidden; "in
+  profile" and "from behind" exclude each other. Describe what shows instead (hands where they are visible, the back
+  of the head).
+- Ends, sides and directions that cannot be misread: "the near end of the table, closest to the camera", "the far
+  end"; left and right as the viewer sees them.
+- A gaze or gesture needs a target already placed ("looking at the man"); without one the model adds one.
+- No quality words ("masterpiece", "8K", "highly detailed") unless the model's prompting notes ask for quality tags:
+  describe what is seen. No size or aspect ratio in the text: that is the render's size.
+- Length comes from the content, not from padding: a scene with several people and exact placement needs more words
+  than a portrait, each still said once. Models cut long prompts: Krea 2 at about 500 tokens, Qwen-Image at 1024.
+
+Before rendering, read the prompt back as the camera sees the scene: who is nearest, who is on the left, what each
+hand touches, what is hidden. Then count: the people (stated when more than one, each introduced once) and each
+person's mentions outside their own block (at most two). Remove what is said twice or negated.
+
+## Revising
+
+When the user wants a change or a render came out wrong:
+
+- Find the part that caused it (the arrangement, one subject's block, the setting, the camera) and rewrite that part
+  in place; keep the others word for word. The prompt stays about as long as it was.
+- Remove before adding: first take out what conflicts or competes (a second mention of someone, a detail the camera
+  cannot see, a clause about another subject's body), then rephrase, and add only if that fails.
+- A wrong number of people, body parts on the wrong person or merged figures usually come from too many
+  cross-references: shorten.
+- When the cause is unclear, change one thing per render, so that the result shows what worked.
+- When several subjects keep landing in the wrong places with a model that takes layouts, use one (see "Layouts"): a
+  box per person fixes where each goes and how many there are.
 
 ## Layouts
 
@@ -88,7 +98,7 @@ DRAFT being a file, `-` to read it from standard input (e.g. a heredoc), or the 
 {"width": 1344, "height": 768,
  "summary": {"caption": "<the whole image: setting, light, style, and the subjects and their arrangement in brief>"},
  "items": [
-  {"label": "character", "caption": "<everything about this one: look, clothing, pose, expression, contact>",
+  {"label": "character", "caption": "<this one only: look, clothing, pose, expression, one contact at most>",
    "bbox": [80, 96, 640, 768]},
   {"label": "character", "caption": "<the other one>", "bbox": [600, 64, 1260, 768]},
   {"label": "object", "caption": "<a thing that matters>", "bbox": [520, 520, 820, 760]}
@@ -98,8 +108,9 @@ DRAFT being a file, `-` to read it from standard input (e.g. a heredoc), or the 
 - `bbox` is `[left, top, right, bottom]` in pixels from the image's top-left corner; width and height are multiples
   of 32. Boxes may overlap where subjects overlap or touch; a box is where the subject is, not a frame drawn around
   it.
-- Each caption carries that subject's full description, and `summary.caption` the scene, with the same details in
-  agreement.
+- A box's caption is drawn inside the box, so it describes only that subject, as a block of "Writing the prompt"
+  does; describing another subject's body there draws it twice. `summary.caption` gives the medium, the arrangement
+  in brief and the setting.
 - Labels: `character` for people and creatures, `object` for things, `text` (with `"text": "<the exact words>"`)
   for lettering.
 
@@ -118,7 +129,8 @@ scripts/scene.py spec.json --n 3 --seed 1 | head -n 1 | scripts/render.sh --mode
 - Each draft writes what depends on its camera: where each body is in the frame, how it is turned to the camera,
   which body is in front of which, which object hides part of a person, where the frame cuts it. Captions are copied
   into every draft unchanged, so they never mention the camera or the frame ("facing the camera", "on the left");
-  they relate each person to the others and to objects ("his back to the window", "her hand on the man's shoulder").
+  they place a person relative to others and to objects ("his back to the window", "her hand on the man's
+  shoulder"), and otherwise describe only that person (see "Layouts").
 - A posture fixes a body's box and little else: the caption says the rest (lying on the back, front or side; arms,
   legs, hands). A pose no posture covers (legs hanging over a ledge, bent at the waist) gets its own `box` and `base`
   around the whole body, or the image model fills the posture's box.
@@ -138,7 +150,7 @@ what it is good at, how its prompts should be written and how long it takes, and
 - Keep the same model for the rest of the conversation, so characters and style stay consistent; change it only when
   the user asks or the material changes (a photograph after anime illustrations).
 - Write the prompt the way the chosen model's `prompting` notes say (prose, tags, prompt weights, layouts), on top
-  of the rules above.
+  of "Writing the prompt".
 - Rendering with another model than the loaded one first loads it (a few seconds more).
 
 ## LoRAs
