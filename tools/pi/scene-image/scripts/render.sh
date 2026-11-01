@@ -1,22 +1,27 @@
 #!/bin/sh
 # Renders an image with mako_image_serve's /v1/images/generations and saves it as a PNG.
-#   render.sh [--model NAME] [--lora NAME[:SCALE]]... [--no-loras] [--steps N] WIDTHxHEIGHT "prompt"
+#   render.sh [--model NAME] [--lora NAME[:SCALE]]... [--no-loras] [--steps N] [--negative TEXT] [--guidance F]
+#             WIDTHxHEIGHT "prompt"
 #   render.sh [options] --layout DRAFT     (MOSS-Image: a layout draft, see layout.py, as a file, - for standard input or
 #                                           the JSON itself; the size comes from the draft)
 # --model renders with that image model (default: the server's); --lora (repeatable) with these LoRAs in place of the
 # model's defaults; --no-loras with none; --steps N denoising steps (0: the model's own count; default: the model's
-# setting).
+# setting); --negative what the image should not show (a second transformer pass a step); --guidance its scale
+# (default: the model's).
 # MAKO_IMAGE_URL (mako_image_serve; default http://127.0.0.1:8082/v1), MAKO_IMAGE_API_KEY (when the server wants
 # one), MAKO_IMAGE_DIR (default ~/Pictures/mako), MAKO_IMAGE_OPEN=0 (not opened in the image viewer). Prints the saved
 # file's path.
 set -eu
 usage() {
-    echo "usage: render.sh [--model NAME] [--lora NAME[:SCALE]]... [--no-loras] [--steps N] WIDTHxHEIGHT \"prompt\"" >&2
+    echo "usage: render.sh [--model NAME] [--lora NAME[:SCALE]]... [--no-loras] [--steps N] [--negative TEXT]" >&2
+    echo "                 [--guidance F] WIDTHxHEIGHT \"prompt\"" >&2
     echo "       render.sh [options] --layout DRAFT.json|-|'{...}'" >&2
     exit 2
 }
 loras=
 steps=
+negative=
+guidance=
 model=
 layout=
 while [ $# -gt 0 ]; do
@@ -40,6 +45,16 @@ while [ $# -gt 0 ]; do
     --steps)
         [ $# -ge 2 ] || usage
         steps=$2
+        shift 2
+        ;;
+    --negative)
+        [ $# -ge 2 ] || usage
+        negative=$2
+        shift 2
+        ;;
+    --guidance)
+        [ $# -ge 2 ] || usage
+        guidance=$2
         shift 2
         ;;
     --no-loras)
@@ -67,7 +82,7 @@ mkdir -p "$dir"
 base="$dir/$(date +%Y%m%d-%H%M%S)"
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
-body=$(SIZE=$size PROMPT=$prompt LORAS=$loras STEPS=$steps MODEL=$model python3 -c '
+body=$(SIZE=$size PROMPT=$prompt LORAS=$loras STEPS=$steps MODEL=$model NEGATIVE=$negative GUIDANCE=$guidance python3 -c '
 import json, os, sys
 b = {"prompt": os.environ["PROMPT"], "size": os.environ["SIZE"], "n": 1, "response_format": "b64_json"}
 if os.environ["MODEL"]:
@@ -77,6 +92,13 @@ if os.environ["STEPS"]:
         b["steps"] = int(os.environ["STEPS"])
     except ValueError:
         sys.exit("--steps takes a whole number")
+if os.environ["NEGATIVE"]:
+    b["negative_prompt"] = os.environ["NEGATIVE"]
+if os.environ["GUIDANCE"]:
+    try:
+        b["guidance_scale"] = float(os.environ["GUIDANCE"])
+    except ValueError:
+        sys.exit("--guidance takes a number")
 if os.environ["LORAS"]:
     b["loras"] = []
     for spec in filter(None, os.environ["LORAS"].split("\n")):

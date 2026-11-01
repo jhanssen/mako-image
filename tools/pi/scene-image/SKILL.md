@@ -27,7 +27,8 @@ Turn what the conversation has established into one image prompt, render it with
      hardness) and the mood;
    - the art style the user has asked for in this session; otherwise one that suits the material, stated plainly
      ("oil painting", "cinematic photograph", "watercolour", "editorial photography", ...);
-   - no text or lettering in the image unless the user wants it; no list of things to avoid.
+   - no text or lettering in the image unless the user wants it; no list of things to avoid (the prompt describes
+     what is there; things to keep out go in `--negative`, see "Options").
    Do not summarize or soften what the user asked for: an abstraction ("an intimate moment", "a dramatic scene", "a
    fantasy outfit") gives a generic image; say what is actually seen instead. Do not leave out a detail because it
    was mentioned long ago or seems implied; if the user describes something, it belongs in the prompt in their
@@ -44,10 +45,10 @@ Turn what the conversation has established into one image prompt, render it with
    scripts/render.sh --model MODEL WIDTHxHEIGHT "<the prompt>"
    ```
 
-   (Its options are under "Options".) It prints the path of the PNG it saved. It takes from a few seconds to a few minutes (the model's description
-   gives its time). When the image server shares the Mac with the chat model's mako_serve (`--llm`), the chat model is
-   unloaded while the image model is loaded; the next message loads it again (~10 s), and this conversation
-   continues as before.
+   (Its options are under "Options".) It prints the path of the PNG it saved. It takes from a few seconds to a few
+   minutes (the model's description gives its time). When the image server shares the Mac with the chat model's
+   mako_serve (`--llm`), the chat model is unloaded while the image model is loaded; the next message loads it again
+   (~10 s), and this conversation continues as before.
 4. The script opens the image in the Mac's image viewer. Reply with its path and the prompt used, in a line or two.
    Do not `read` the image unless the user wants to talk about what is in it (it then goes to the model as image
    input, which needs the chat model's mako_serve started with `--mmproj`). If the user wants changes, adjust the
@@ -156,6 +157,16 @@ uses unless told otherwise, at the scale shown.
 - `--steps N`: denoising steps, 0 to 100; 0 is the model's own count; without it the step count the server set for the
   model applies (lower with a speed LoRA). More steps take longer. Leave it out unless the user asks for more or fewer
   steps, or the speed LoRA a model's low step count is set for is gone.
+- `--negative "TEXT"`: what the image should not show, as a short list ("blurry, extra fingers, text, watermark"),
+  when the user wants something kept out or a render keeps showing something unwanted. It adds a second transformer
+  pass a step, so the render takes about twice as long. Qwen-Image follows it well; Krea 2 Turbo barely (it was
+  trained to run without one). MOSS-Image always runs that pass (against an empty negative prompt without one) and
+  Anima (not Turbo) against a default one, so there it costs no extra time. A model at guidance 1 (the models list
+  shows it; speed-LoRA setups) skips the pass, and a negative prompt has no effect.
+- `--guidance F`: how strongly the prompt, against the negative prompt, steers the image (0 to 30; default the
+  model's: Qwen-Image 4, Krea 2 Turbo 2, MOSS-Image 3, Anima 4). Too high gives flat, oversaturated or broken images
+  (Krea 2 Turbo from 3). Change it only when the user asks, or by 1 at a time when a negative prompt shows too little
+  or too much.
 - `--layout DRAFT`: a MOSS-Image layout in place of size and prompt (see "Layouts").
 
 The environment, set by the user: `MAKO_IMAGE_URL` and `MAKO_IMAGE_API_KEY` (the server), `MAKO_IMAGE_DIR` (where
