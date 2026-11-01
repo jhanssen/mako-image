@@ -16,7 +16,8 @@ Metres on the floor: x to the right and z toward the camera as seen from yaw 0. 
 yaw F (0: toward the yaw-0 camera, 90: toward its right). Lying and on all fours: facing is where the head points.
 
 Each draft adds what depends on its camera: where a body is in the frame, how it is turned to the camera, which
-body is in front of another, where the frame cuts it. Captions go into every draft as written, so they say nothing
+body is in front of another, which object a person stands behind (and what of them it hides), where the frame cuts
+it. Captions go into every draft as written, so they say nothing
 about the camera or the frame ("facing the camera", "on the left"); they place things relative to the people and
 objects ("her back to the window", "his hand on the woman's shoulder"). What the posture leaves open is the
 caption's: lying on the back, front or side; arms and legs.
@@ -184,6 +185,22 @@ SEATED = [(0.75, "neck", "everything below the shoulders"), (0.55, "chest", "the
           (0.35, "waist", "the lap and legs"), (0.1, "lap", "the lower legs and feet")]
 
 
+def part_at(b, t):
+    """(part, hidden) of an upright body cut at fraction t of its height; None below the knees."""
+    for lim, part, hidden in (CUTS if b.posture == "standing" else SEATED):
+        if t >= lim:
+            return part, hidden
+    return None
+
+
+def inside(b, o):
+    """Whether b's centre is over o's footprint (on it or at it, not beside it)."""
+    f = heading(o.facing)
+    r = [f[2], 0.0, -f[0]]
+    d = sub(b.centre, o.centre)
+    return abs(dot(d, r)) <= o.dims[0] / 2 and abs(dot(d, f)) <= o.dims[1] / 2
+
+
 def cutoff(b, project, H):
     """(part, hidden) where the frame's bottom edge cuts an upright body; None if it is fully in."""
     h = b.dims[2]
@@ -195,10 +212,7 @@ def cutoff(b, project, H):
         return None
     if t <= 0.02:
         return None
-    for lim, part, hidden in (CUTS if b.posture == "standing" else SEATED):
-        if t >= lim:
-            return part, hidden
-    return None
+    return part_at(b, t)
 
 
 def viewpoint(cam, framing):
@@ -281,15 +295,26 @@ def render(spec, rng):
             notes.append(POSE_TEXT[b.posture])
             notes.append(orientation(b, cam, project))
             for j, o in enumerate(bodies):
-                if j == i or not o.person:
+                if j == i:
                     continue
                 (a0, b0, a1, b1), _, _, (along2, near2) = boxes[j]
                 ov = max(0, min(x1, a1) - max(x0, a0)) * max(0, min(y1, b1) - max(y0, b0))
                 # Bodies about level along the view overlap side by side (touching), not one hiding the other.
                 dc, dn = along2 - along, near2 - near
                 apart = abs(dc) >= DEPTH_APART or (abs(dn) >= DEPTH_APART and abs(dc) >= 0.02 and dc * dn > 0)
-                if ov > 0.15 * (x1 - x0) * (y1 - y0) and apart:
+                if ov <= 0.15 * (x1 - x0) * (y1 - y0) or not apart:
+                    continue
+                if o.person:
                     notes.append(f"in front of {o.id}" if dc > 0 else f"partly behind {o.id}")
+                    continue
+                # An object nearer the camera hides what of the person is below its top, unless the person is on it.
+                top = o.base + o.dims[2]
+                if dc < 0 and top > b.base + 0.05 * b.dims[2] and not inside(b, o):
+                    across = (min(x1, a1) - max(x0, a0)) / (x1 - x0)  # how much of the person's width it covers
+                    cut = part_at(b, (top - b.base) / b.dims[2]) \
+                        if b.kind == "upright" and top < b.base + b.dims[2] and across >= 0.7 else None
+                    hides = f", which hides {cut[1]} below the {cut[0]}" if cut else ""
+                    notes.append(f"partly behind {o.id}{hides}")
             cut = cutoff(b, project, H) if b.kind == "upright" else None
             if cut:
                 cuts.append(f"{b.id}'s {cut[0]}")

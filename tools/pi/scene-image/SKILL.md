@@ -116,9 +116,9 @@ scripts/scene.py spec.json --n 3 --seed 1 | head -n 1 | scripts/render.sh --mode
 ```
 
 - Each draft writes what depends on its camera: where each body is in the frame, how it is turned to the camera,
-  which body is in front of which, where the frame cuts it. Captions are copied into every draft unchanged, so they
-  never mention the camera or the frame ("facing the camera", "on the left"); they relate each person to the others
-  and to objects ("his back to the window", "her hand on the man's shoulder").
+  which body is in front of which, which object hides part of a person, where the frame cuts it. Captions are copied
+  into every draft unchanged, so they never mention the camera or the frame ("facing the camera", "on the left");
+  they relate each person to the others and to objects ("his back to the window", "her hand on the man's shoulder").
 - A posture fixes a body's box and little else: the caption says the rest (lying on the back, front or side; arms,
   legs, hands). A pose no posture covers (legs hanging over a ledge, bent at the waist) gets its own `box` and `base`
   around the whole body, or the image model fills the posture's box.
