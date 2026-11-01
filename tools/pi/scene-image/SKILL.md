@@ -1,11 +1,11 @@
 ---
 name: scene-image
-description: Render a picture of the current scene, character, place or moment from this conversation with one of the local mako image models, and show it. Use when the user asks for an image, illustration, picture or visual of what is being written, imagined or built in the session.
+description: Render a picture of the current scene, character, place or moment from this conversation with one of the local mako-image models (mako_image_serve), and show it. Use when the user asks for an image, illustration, picture or visual of what is being written, imagined or built in the session.
 ---
 
 # Scene image
 
-Turn what the conversation has established into one image prompt, render it with mako, and show the result.
+Turn what the conversation has established into one image prompt, render it with mako_image_serve, and show the result.
 
 0. Pick the image model (see "Models" below) unless one is already in use in this conversation.
 1. Write one image prompt in English, 100-300 words, from the conversation so far, in full descriptive sentences
@@ -45,11 +45,13 @@ Turn what the conversation has established into one image prompt, render it with
    ```
 
    It prints the path of the PNG it saved. It takes from a few seconds to a few minutes (the model's description
-   gives its time); when the image server shares the Mac with mako (`--llm`), mako has the chat model unloaded
-   meanwhile, and this conversation continues as before once it is back.
+   gives its time). When the image server shares the Mac with the chat model's mako_serve (`--llm`), the chat model is
+   unloaded while the image model is loaded; the next message loads it again (~10 s), and this conversation
+   continues as before.
 4. The script opens the image in the Mac's image viewer. Reply with its path and the prompt used, in a line or two.
    Do not `read` the image unless the user wants to talk about what is in it (it then goes to the model as image
-   input, which needs mako started with `--mmproj`). If the user wants changes, adjust the prompt and render again.
+   input, which needs the chat model's mako_serve started with `--mmproj`). If the user wants changes, adjust the
+   prompt and render again.
 
 ## Placing several subjects
 
@@ -102,9 +104,9 @@ DRAFT being a file, `-` to read it from standard input (e.g. a heredoc), or the 
 
 ## Models
 
-`scripts/models.sh` lists the image models mako has: each one's name, which model it is, a description of what it is
-good at, how its prompts should be written and how long it takes, and its default LoRAs; one is marked "default"
-(used without `--model`) and one "loaded" (rendering with it needs no reload).
+`scripts/models.sh` lists the image models the image server has: each one's name, which model it is, a description of
+what it is good at, how its prompts should be written and how long it takes, and its default LoRAs; one is marked
+"default" (used without `--model`) and one "loaded" (rendering with it needs no reload).
 
 - Pick by what the user asks for and by the descriptions: the style (anime and illustration, photograph, painting),
   what the image must contain (legible text, a layout), the kind of content, and the time the user will wait. A model

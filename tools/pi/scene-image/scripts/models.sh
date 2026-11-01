@@ -1,6 +1,6 @@
 #!/bin/sh
-# Lists the image models mako can render with (GET /v1/images/models): a name per line, the default and the loaded one
-# marked, then each one's model family, description, how to prompt it and default LoRAs.
+# Lists the image models mako_image_serve can render with (GET /v1/images/models): a name per line, the default and
+# the loaded one marked, then each one's model family, description, how to prompt it and default LoRAs.
 # MAKO_IMAGE_URL (default http://127.0.0.1:8081/v1), MAKO_IMAGE_API_KEY (when the server wants one).
 set -eu
 url=${MAKO_IMAGE_URL:-http://127.0.0.1:8081/v1}
@@ -13,9 +13,9 @@ import json, os, sys
 try:
     d = json.load(open(sys.argv[1]))
 except Exception:
-    sys.exit(f"mako answered HTTP {os.environ['STATUS']} with no JSON")
+    sys.exit(f"mako_image_serve answered HTTP {os.environ['STATUS']} with no JSON")
 if os.environ["STATUS"] != "200" or "data" not in d:
-    sys.exit(f"mako: HTTP {os.environ['STATUS']}: {d.get('error', {}).get('message', d)}")
+    sys.exit(f"mako_image_serve: HTTP {os.environ['STATUS']}: {d.get('error', {}).get('message', d)}")
 for m in d["data"]:
     marks = [k for k in ("default", "loaded") if m.get(k)]
     print(m["id"] + (f"  ({', '.join(marks)})" if marks else ""))

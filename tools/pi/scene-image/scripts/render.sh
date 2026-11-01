@@ -1,5 +1,5 @@
 #!/bin/sh
-# Renders an image with mako's /v1/images/generations and saves it as a PNG.
+# Renders an image with mako_image_serve's /v1/images/generations and saves it as a PNG.
 #   render.sh [--model NAME] [--lora NAME[:SCALE]]... [--no-loras] [--steps N] WIDTHxHEIGHT "prompt"
 #   render.sh [options] --layout DRAFT     (MOSS-Image: a layout draft, see layout.py, as a file, - for standard input or
 #                                           the JSON itself; the size comes from the draft)
@@ -87,15 +87,16 @@ if os.environ["LORAS"]:
             b["loras"].append({"name": spec})
 print(json.dumps(b))')
 status=$(curl -sS -o "$tmp" -w '%{http_code}' --max-time 1800 "$url/images/generations" \
-    -H 'Content-Type: application/json' ${MAKO_IMAGE_API_KEY:+-H "Authorization: Bearer $MAKO_IMAGE_API_KEY"} -d "$body")
+    -H 'Content-Type: application/json' ${MAKO_IMAGE_API_KEY:+-H "Authorization: Bearer $MAKO_IMAGE_API_KEY"} \
+    -d "$body")
 out=$(BASE=$base STATUS=$status python3 - "$tmp" <<'PY'
 import base64, json, os, sys
 try:
     d = json.load(open(sys.argv[1]))
 except Exception:
-    sys.exit(f"mako answered HTTP {os.environ['STATUS']} with no JSON")
+    sys.exit(f"mako_image_serve answered HTTP {os.environ['STATUS']} with no JSON")
 if os.environ["STATUS"] != "200" or "data" not in d:
-    sys.exit(f"mako: HTTP {os.environ['STATUS']}: {d.get('error', {}).get('message', d)}")
+    sys.exit(f"mako_image_serve: HTTP {os.environ['STATUS']}: {d.get('error', {}).get('message', d)}")
 png = base64.b64decode(d["data"][0]["b64_json"])
 # Renders finishing in the same second each get a file of their own.
 for i in range(1, 1000):

@@ -18,9 +18,9 @@ import json, os, sys
 try:
     d = json.load(open(sys.argv[1]))
 except Exception:
-    sys.exit(f"mako answered HTTP {os.environ['STATUS']} with no JSON")
+    sys.exit(f"mako_image_serve answered HTTP {os.environ['STATUS']} with no JSON")
 if os.environ["STATUS"] != "200" or "data" not in d:
-    sys.exit(f"mako: HTTP {os.environ['STATUS']}: {d.get('error', {}).get('message', d)}")
+    sys.exit(f"mako_image_serve: HTTP {os.environ['STATUS']}: {d.get('error', {}).get('message', d)}")
 if not d["data"]:
     print("(no LoRAs)")
 for l in d["data"]:
