@@ -52,8 +52,8 @@ PRESETS = {
     "overhead": {"yaw": [-30, 30], "elevation": [70, 85]},
     "low": {"yaw": [-40, 40], "elevation": [-20, -8]},
 }
-# Metres one body's footprint must reach nearer the camera (along its view, on the floor) than another's to count as
-# in front of it.
+# Metres along the camera's view (on the floor) one body must be nearer than another to count as in front of it: by
+# its centre, or by the near edge of its footprint when the centre is nearer too.
 DEPTH_APART = 0.1
 SIZES = [(1024, 1024), (1152, 896), (896, 1152), (1216, 832), (832, 1216), (1344, 768), (768, 1344)]
 
@@ -269,11 +269,11 @@ def render(spec, rng):
         cx0, cy0, cx1, cy1 = max(0, x0), max(0, y0), min(W, x1), min(H, y1)
         vis = max(0, cx1 - cx0) * max(0, cy1 - cy0) / area
         near = min(dot([p[0], 0.0, p[2]], view) for p in b.corners())
-        boxes.append(((cx0, cy0, cx1, cy1), vis, r[4], near))
+        boxes.append(((cx0, cy0, cx1, cy1), vis, r[4], (dot([b.centre[0], 0.0, b.centre[2]], view), near)))
 
     items, cuts = [], []
     for i, b in enumerate(bodies):
-        (x0, y0, x1, y1), vis, depth, near = boxes[i]
+        (x0, y0, x1, y1), vis, depth, (along, near) = boxes[i]
         if vis < 0.05:
             continue
         notes = [side((x0 + x1) / 2, W)]
@@ -283,11 +283,13 @@ def render(spec, rng):
             for j, o in enumerate(bodies):
                 if j == i or not o.person:
                     continue
-                (a0, b0, a1, b1), _, _, near2 = boxes[j]
+                (a0, b0, a1, b1), _, _, (along2, near2) = boxes[j]
                 ov = max(0, min(x1, a1) - max(x0, a0)) * max(0, min(y1, b1) - max(y0, b0))
-                # Bodies whose fronts are about level overlap side by side (touching), not one hiding the other.
-                if ov > 0.15 * (x1 - x0) * (y1 - y0) and abs(near - near2) >= DEPTH_APART:
-                    notes.append(f"in front of {o.id}" if near < near2 else f"partly behind {o.id}")
+                # Bodies about level along the view overlap side by side (touching), not one hiding the other.
+                dc, dn = along2 - along, near2 - near
+                apart = abs(dc) >= DEPTH_APART or (abs(dn) >= DEPTH_APART and abs(dc) >= 0.02 and dc * dn > 0)
+                if ov > 0.15 * (x1 - x0) * (y1 - y0) and apart:
+                    notes.append(f"in front of {o.id}" if dc > 0 else f"partly behind {o.id}")
             cut = cutoff(b, project, H) if b.kind == "upright" else None
             if cut:
                 cuts.append(f"{b.id}'s {cut[0]}")
