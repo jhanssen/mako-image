@@ -1,0 +1,67 @@
+{
+ "summary": "A living room with a dark blue sofa, a lamp and bookshelves, evening light, realistic photograph",
+ "people": [
+  {
+   "id": "the man in the plaid shirt",
+   "posture": "sitting",
+   "at": [
+    -0.45,
+    0
+   ],
+   "facing": 0,
+   "height": 1.82,
+   "caption": "a man in his forties with short dark hair, a red plaid shirt and jeans, sitting on the sofa, holding a book on his knee"
+  },
+  {
+   "id": "the woman in the grey sweater",
+   "posture": "sitting",
+   "at": [
+    0.45,
+    0
+   ],
+   "facing": 0,
+   "height": 1.66,
+   "caption": "a woman in her fifties with greying brown hair in a ponytail, a grey sweater and black leggings, sitting on the sofa"
+  },
+  {
+   "id": "the young woman",
+   "posture": "lying",
+   "at": [
+    0.05,
+    0.2
+   ],
+   "facing": 90,
+   "base": 0.6,
+   "height": 1.7,
+   "caption": "a woman in her twenties with wavy pink hair, a white t-shirt and striped pyjama trousers, lying on her back across both of their laps, her head on the lap of the woman in the grey sweater and her calves across the lap of the man in the plaid shirt, looking up at the ceiling"
+  }
+ ],
+ "objects": [
+  {
+   "id": "the sofa",
+   "box": [
+    0.9,
+    2.1,
+    0.85
+   ],
+   "at": [
+    0,
+    -0.1
+   ],
+   "facing": -90,
+   "caption": "a dark blue fabric sofa"
+  }
+ ],
+ "camera": {
+  "preset": [
+   "front",
+   "three-quarter",
+   "high"
+  ],
+  "distance": [
+   3,
+   4.5
+  ],
+  "framing": "full"
+ }
+}

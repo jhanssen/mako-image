@@ -1,0 +1,29 @@
+{
+ "summary": "A kitchen in morning light, realistic photograph",
+ "people": [
+  {
+   "id": "the woman",
+   "posture": "sitting",
+   "at": [
+    0,
+    0
+   ],
+   "facing": 0,
+   "height": 1.66,
+   "caption": "a woman in her fifties with short grey hair, a blue blouse and dark jeans, sitting at a kitchen table, holding a mug in both hands"
+  }
+ ],
+ "camera": {
+  "preset": [
+   "front",
+   "three-quarter",
+   "side",
+   "high",
+   "low"
+  ],
+  "framing": [
+   "full",
+   "close"
+  ]
+ }
+}

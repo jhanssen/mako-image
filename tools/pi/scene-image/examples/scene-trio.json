@@ -1,0 +1,66 @@
+{
+ "summary": "A bright studio portrait against a plain light grey backdrop, realistic photograph, soft even light",
+ "people": [
+  {
+   "id": "the older man",
+   "posture": "sitting",
+   "at": [
+    0,
+    0
+   ],
+   "facing": 0,
+   "height": 1.78,
+   "caption": "a man in his sixties with white hair and a grey moustache, a dark green cardigan over a white shirt, brown trousers, sitting on a stool, hands on his knees"
+  },
+  {
+   "id": "the tall woman",
+   "posture": "standing",
+   "at": [
+    0.05,
+    -0.45
+   ],
+   "facing": 0,
+   "height": 1.78,
+   "caption": "a tall woman in her thirties with straight red hair to the shoulders, a black turtleneck and grey trousers, standing behind the older man, both hands on his shoulders"
+  },
+  {
+   "id": "the young man",
+   "posture": "kneeling",
+   "at": [
+    0.6,
+    0.25
+   ],
+   "facing": -25,
+   "height": 1.75,
+   "caption": "a young man in his twenties with short black hair, a yellow hoodie and jeans, kneeling beside the older man's right knee, his left arm resting on the older man's knee"
+  }
+ ],
+ "objects": [
+  {
+   "id": "the stool",
+   "box": [
+    0.45,
+    0.45,
+    0.6
+   ],
+   "at": [
+    0,
+    0
+   ],
+   "caption": "a wooden stool"
+  }
+ ],
+ "camera": {
+  "preset": [
+   "front",
+   "three-quarter",
+   "side",
+   "high"
+  ],
+  "distance": [
+   3,
+   4.5
+  ],
+  "framing": "full"
+ }
+}

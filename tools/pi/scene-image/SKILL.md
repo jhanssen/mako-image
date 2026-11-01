@@ -103,6 +103,29 @@ DRAFT being a file, `-` to read it from standard input (e.g. a heredoc), or the 
 - Labels: `character` for people and creatures, `object` for things, `text` (with `"text": "<the exact words>"`)
   for lettering.
 
+## Scenes
+
+When where several people are and how they are turned to each other matters, or to try the same arrangement from
+several camera angles, describe the room instead of the boxes: `scripts/scene.py SPEC [--n N] [--seed S]` places
+people (by posture, position and facing, in metres) and objects on a floor, puts a camera there, and prints one layout
+draft per line for `render.sh --layout` (MOSS-Image only). Camera ranges or several presets give each draft its own
+camera. The spec's format is in scene.py's header; `examples/` has five.
+
+```sh
+scripts/scene.py spec.json --n 3 --seed 1 | head -n 1 | scripts/render.sh --model MODEL --layout -
+```
+
+- Each draft writes what depends on its camera: where each body is in the frame, how it is turned to the camera,
+  which body is in front of which, where the frame cuts it. Captions are copied into every draft unchanged, so they
+  never mention the camera or the frame ("facing the camera", "on the left"); they relate each person to the others
+  and to objects ("his back to the window", "her hand on the man's shoulder").
+- A posture fixes a body's box and little else: the caption says the rest (lying on the back, front or side; arms,
+  legs, hands). A pose no posture covers (legs hanging over a ledge, bent at the waist) gets its own `box` and `base`
+  around the whole body, or the image model fills the posture's box.
+- A layout has positions in the frame, not depth. "Between", "behind" and "across" show only when the camera looks
+  across them, so that they run left to right in the image; from other angles, leave them to the captions.
+- Objects behind the camera are left out of that draft; a person behind it is an error (move the camera back).
+
 ## Models
 
 `scripts/models.sh` lists the image models the image server has: each one's name, which model it is, a description of
