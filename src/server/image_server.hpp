@@ -18,7 +18,7 @@ using LoadImage = std::function<std::unique_ptr<image::Engine>(const ImageModel&
 
 struct ImageServerOptions {
     std::string host = "127.0.0.1";
-    int port = 8081;
+    int port = 8082;
     std::vector<std::string> api_keys; // empty: requests only from this machine (and no other web page)
     // A directory of model directories (read on each request; see ImageModel), and the one for requests that name
     // none (a name there, or a model directory alone; default: the first).

@@ -1,9 +1,9 @@
 #!/bin/sh
 # Lists the image models mako_image_serve can render with (GET /v1/images/models): a name per line, the default and
 # the loaded one marked, then each one's model family, description, how to prompt it and default LoRAs.
-# MAKO_IMAGE_URL (default http://127.0.0.1:8081/v1), MAKO_IMAGE_API_KEY (when the server wants one).
+# MAKO_IMAGE_URL (default http://127.0.0.1:8082/v1), MAKO_IMAGE_API_KEY (when the server wants one).
 set -eu
-url=${MAKO_IMAGE_URL:-http://127.0.0.1:8081/v1}
+url=${MAKO_IMAGE_URL:-http://127.0.0.1:8082/v1}
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 status=$(curl -sS -o "$tmp" -w '%{http_code}' --max-time 30 "$url/images/models" \

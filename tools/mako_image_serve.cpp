@@ -55,7 +55,7 @@ int main(int argc, char** argv)
         .option("--image-model", "NAME|DIR", "the model for requests that name none (default: the first)",
                 so.image_model)
         .option("--host", "H", "address to listen on (default 127.0.0.1; others need an API key)", so.host)
-        .option("--port", "N", "port to listen on (default 8081)", so.port)
+        .option("--port", "N", "port to listen on (default 8082)", so.port)
         .option("--api-key", "KEY[,KEY...]", "keys requests must carry (Bearer or x-api-key)",
                 [&](const std::string& v) { add_keys(v, ','); })
         .secret()

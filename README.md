@@ -29,12 +29,12 @@ cmake --build mako-image/build
 ## Run
 
 ```sh
-./build/mako_image_serve --image-models ~/models/image --port 8081
+./build/mako_image_serve --image-models ~/models/image --port 8082
 # sharing the Mac with mako_serve on port 8080:
-./build/mako_image_serve --image-models ~/models/image --port 8081 --llm http://127.0.0.1:8080
+./build/mako_image_serve --image-models ~/models/image --port 8082 --llm http://127.0.0.1:8080
 ```
 
-Options: `--image-models DIR`, `--image-model NAME|DIR`, `--host H`, `--port N` (default 8081), `--api-key
+Options: `--image-models DIR`, `--image-model NAME|DIR`, `--host H`, `--port N` (default 8082), `--api-key
 KEY[,KEY...]` / `--api-key-file FILE` (needed to listen beyond loopback), `--max-waiting N`, `--llm URL` and
 `--llm-api-key KEY` (when mako_serve wants one). Each also from `MAKO_IMAGE_<OPTION>` (e.g. `MAKO_IMAGE_PORT`), and
 from presets (`--preset NAME`, `MAKO_IMAGE_PRESET`).
@@ -49,7 +49,7 @@ in DIR, one directory each (named by it); `--image-model NAME` is the one for re
 first by name; or a model directory's path, alone without `--image-models`):
 
 ```sh
-curl -s localhost:8081/v1/images/generations -H 'Content-Type: application/json' \
+curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json' \
   -d '{"prompt": "a misty harbour town at dawn", "size": "1024x1024", "model": "qwen-image"}' \
   | jq -r '.data[0].b64_json' | base64 -d > out.png
 ```
@@ -124,7 +124,7 @@ curl -s localhost:8081/v1/images/generations -H 'Content-Type: application/json'
   endpoint (`ln -s "$PWD/tools/pi/scene-image" ~/.pi/agent/skills/`; then ask for an image of the scene, or
   `/skill:scene-image`). It lists the models and picks one by their descriptions, lists the chosen model's LoRAs and
   passes them when the user wants them. Its script saves to `~/Pictures/mako` (`MAKO_IMAGE_DIR`) and opens the image;
-  `MAKO_IMAGE_URL` (default `http://127.0.0.1:8081/v1`) and `MAKO_IMAGE_API_KEY` point it at the server.
+  `MAKO_IMAGE_URL` (default `http://127.0.0.1:8082/v1`) and `MAKO_IMAGE_API_KEY` point it at the server.
 - Not yet: condition images (edits, references; `/v1/images/edits`), image to image, and a per-request seed.
 
 

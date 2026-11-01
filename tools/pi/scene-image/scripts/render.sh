@@ -6,7 +6,7 @@
 # --model renders with that image model (default: the server's); --lora (repeatable) with these LoRAs in place of the
 # model's defaults; --no-loras with none; --steps N denoising steps (0: the model's own count; default: the model's
 # setting).
-# MAKO_IMAGE_URL (mako_image_serve; default http://127.0.0.1:8081/v1), MAKO_IMAGE_API_KEY (when the server wants
+# MAKO_IMAGE_URL (mako_image_serve; default http://127.0.0.1:8082/v1), MAKO_IMAGE_API_KEY (when the server wants
 # one), MAKO_IMAGE_DIR (default ~/Pictures/mako), MAKO_IMAGE_OPEN=0 (not opened in the image viewer). Prints the saved
 # file's path.
 set -eu
@@ -61,7 +61,7 @@ else
     size=$1
     prompt=$2
 fi
-url=${MAKO_IMAGE_URL:-http://127.0.0.1:8081/v1}
+url=${MAKO_IMAGE_URL:-http://127.0.0.1:8082/v1}
 dir=${MAKO_IMAGE_DIR:-$HOME/Pictures/mako}
 mkdir -p "$dir"
 base="$dir/$(date +%Y%m%d-%H%M%S)"

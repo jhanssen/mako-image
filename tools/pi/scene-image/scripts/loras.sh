@@ -2,9 +2,9 @@
 # Lists the LoRAs an image model can render with (GET /v1/images/loras): a name per line, the model's defaults marked
 # with the scale they are merged at, then each one's trigger, recommended scales and description when known.
 #   loras.sh [MODEL]   (default: the server's default model)
-# MAKO_IMAGE_URL (default http://127.0.0.1:8081/v1), MAKO_IMAGE_API_KEY (when the server wants one).
+# MAKO_IMAGE_URL (default http://127.0.0.1:8082/v1), MAKO_IMAGE_API_KEY (when the server wants one).
 set -eu
-url=${MAKO_IMAGE_URL:-http://127.0.0.1:8081/v1}
+url=${MAKO_IMAGE_URL:-http://127.0.0.1:8082/v1}
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 query=
