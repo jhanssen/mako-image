@@ -28,11 +28,12 @@ Turn what the conversation has established into one image prompt, render it with
 
 ## Writing the prompt
 
-The image model knows only what the prompt says and fills the rest with its most common choice. Its text encoder is a
-language model, so write English sentences, not keyword lists (a model whose prompting notes say it takes tags can
-have them in front). It binds words to subjects loosely: every mention of a person, every "he" or "she" and every
-named body part is one more chance to attach something to the wrong body, draw a person twice or put a limb in the
-wrong place. A good prompt says each thing once, in one place, and nothing the image cannot show.
+The image model knows only what the prompt says and fills the rest with its most common choice. Most models' text
+encoders are language models, so write English sentences, not keyword lists (a model whose prompting notes say it takes
+tags can have them in front; one that takes only Danbooru tags: see "Tag prompts"). It binds words to subjects loosely:
+every mention of a person, every "he" or "she" and every named body part is one more chance to attach something to the
+wrong body, draw a person twice or put a limb in the wrong place. A good prompt says each thing once, in one place, and
+nothing the image cannot show.
 
 Build it in this order:
 
@@ -72,6 +73,29 @@ Rules:
 Before rendering, read the prompt back as the camera sees the scene: who is nearest, who is on the left, what each
 hand touches, what is hidden. Then count: the people (stated when more than one, each introduced once) and each
 person's mentions outside their own block (at most two). Remove what is said twice or negated.
+
+## Tag prompts
+
+For a model whose prompting notes say Danbooru-style tags (Illustrious and other SDXL anime models, Anima), the tags
+must be ones the model learned: an invented tag ("sparkly dress", "long silver hair") is read as loose words or not
+at all. `scripts/tags.py` looks them up in Danbooru's tag list with each tag's post count (a tag on a few dozen
+images is barely learned).
+
+- The same build order, as tags: quality and rating tags as the notes give them; the count (`1girl`, `2boys`); the
+  character and series tags; per subject its look (hair, eyes, clothing piece by piece with colour), pose and
+  expression; the setting; the framing and light (`upper body`, `from below`, `backlighting`). Tags lowercase with
+  spaces, separated by commas.
+- `scripts/tags.py search WORDS` when unsure what a thing is called: it lists the tags containing the words, most
+  used first (`search ponytail`: ponytail, side ponytail, high ponytail ...); a character's tag usually carries the
+  series (`search anne`: takamaki anne). Artist and meta tags only with `--all`, and an artist tag only when the user
+  asks for that artist's style.
+- Before rendering, `scripts/tags.py check "<prompt>"`, and rewrite what it flags: `alias` (use the name it gives),
+  `unknown` (pick from its suggestions or search), `rare` (fewer than 500 posts: keep it only if nothing more common
+  says it), `prose` (split into tags). Quality and rating words are conventions, not tags, and pass.
+- Weights, `(tag:1.2)`, only for a tag that a render showed too weakly, 1.1 to 1.4.
+
+The list is `~/models/tags/danbooru.csv` (`MAKO_TAGS_CSV`); if the script says there is none, write the tags as best
+you can and tell the user the check did not run.
 
 ## Revising
 
@@ -207,8 +231,9 @@ uses unless told otherwise, at the scale shown.
 - `--layout DRAFT`: a MOSS-Image layout in place of size and prompt (see "Layouts").
 
 The environment, set by the user: `MAKO_IMAGE_URL` and `MAKO_IMAGE_API_KEY` (the server), `MAKO_IMAGE_DIR` (where
-images are saved, default `~/Pictures/mako`), `MAKO_IMAGE_OPEN=0` (do not open the image viewer). `scripts/models.sh`
-takes no options; `scripts/loras.sh [MODEL]` lists the server's default model's LoRAs without one.
+images are saved, default `~/Pictures/mako`), `MAKO_IMAGE_OPEN=0` (do not open the image viewer), `MAKO_TAGS_CSV`
+(the tag list). `scripts/models.sh` takes no options; `scripts/loras.sh [MODEL]` lists the server's default model's
+LoRAs without one.
 
 If a script fails, report its message: mako_image_serve may not be running (or not at `MAKO_IMAGE_URL`), may need an
 API key (`MAKO_IMAGE_API_KEY`), or may not have a model or LoRA of that name (list them again). A message starting
