@@ -22,11 +22,17 @@ void write_file(const std::string& path, std::span<const uint8_t> data);
 struct Provenance {
     std::string prompt, model;
     std::optional<std::string> negative; // when guided
-    std::string sampler = "euler"; // the API's name: "euler", "euler_a"
+    std::string sampler = "euler"; // the API's name: "euler", "euler_a", "er_sde"
+    std::vector<uint32_t> skip_blocks; // the blocks the negative prompt's pass left out
     float guidance = 1;
     uint32_t steps = 0, width = 0, height = 0;
     uint64_t seed = 0;
-    std::vector<std::pair<std::string, float>> loras; // names and scales
+    struct Lora {
+        std::string name;
+        float scale = 1;
+        std::optional<bool> merge; // as asked (unset: the model's way)
+    };
+    std::vector<Lora> loras;
 };
 // The PNG with UTF-8 text chunks before its end: "parameters" (the prompt, then "Negative prompt: ...", then
 // "Steps: ..., Sampler: ..., CFG scale: ..., Seed: ..., Size: WxH, Model: ...", as image tools commonly read it)

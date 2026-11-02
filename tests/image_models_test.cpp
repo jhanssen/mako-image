@@ -37,19 +37,26 @@ void image_model_checks()
     fs::create_directories(root / "notes");
     std::ofstream(root / "a" / "model_index.json") << R"({"_class_name": "Krea2Pipeline"})";
     std::ofstream(root / "b" / "loras" / "x.safetensors") << "x";
+    std::ofstream(root / "b" / "loras" / "y.safetensors") << "y";
     std::ofstream(root / "b" / "mako.json")
-        << R"({"model": "../a", "steps": 4, "guidance": 1.5, "terminal": 0, "loras": {"x": 0.5}, "description": "d", "prompting": "p"})";
+        << R"({"model": "../a", "steps": 4, "guidance": 1.5, "terminal": 0, "loras": {"x": 0.5, "y": {"merge": true}}, "description": "d", "prompting": "p"})";
     std::ofstream(root / "c" / "mako.json") << R"({"model": "../a", "loras": {"missing": 1}})";
+    // Krea 2 merges every LoRA.
+    fs::create_directories(root / "d" / "loras");
+    std::ofstream(root / "d" / "loras" / "x.safetensors") << "x";
+    std::ofstream(root / "d" / "mako.json") << R"({"model": "../a", "loras": {"x": {"merge": false}}})";
     const auto list = mako::server::image_models(root.string());
     check(list.size() == 2 && list[0].name == "a" && list[1].name == "b",
-          "image models: the directories holding one, a bad mako.json left out");
+          "image models: the directories holding one, bad mako.json files (a missing LoRA, an unmerged LoRA for a model "
+          "that merges them) left out");
     if (list.size() == 2) {
         const auto& b = list[1];
         check(b.dir == fs::absolute(root / "a").lexically_normal().string() && b.steps == 4 && b.guidance == 1.5f &&
-                  b.terminal == 0.0f && b.loras.size() == 1 && b.loras[0].second == 0.5f &&
+                  b.terminal == 0.0f && b.loras.size() == 2 && b.loras[0].scale == 0.5f && !b.loras[0].merge &&
+                  b.loras[1].scale == 1.0f && b.loras[1].merge == true &&
                   b.lora_dir == fs::absolute(root / "b" / "loras").lexically_normal().string() &&
                   b.key() == list[0].key() && b.family == "Krea 2" && b.description == "d" && b.prompting == "p",
-              "mako.json: the model it points at, its settings, its LoRAs from its loras/");
+              "mako.json: the model it points at, its settings, its LoRAs (scales, merge choices) from its loras/");
         check(list[0].lora_dir.empty() && list[0].loras.empty(), "a plain model directory: no LoRA directory");
     }
     fs::remove_all(root);
@@ -62,20 +69,24 @@ void lora_checks()
     fs::create_directories(dir);
     for (const char* f : {"b.safetensors", "a.safetensors", "style.safetensors", "notes.txt"})
         std::ofstream(dir / f) << "x";
-    const mako::image::Loras defaults{{"/elsewhere/style.safetensors", 1.3f}};
+    const mako::image::Loras defaults{{"/elsewhere/style.safetensors", 1.3f, false}};
     const auto choices = mako::server::lora_choices(defaults, dir.string());
     check(choices.size() == 3 && choices[0].name == "style" && choices[0].path == "/elsewhere/style.safetensors" &&
-              choices[0].scale == 1.3f && choices[1].name == "a" && !choices[1].scale && choices[2].name == "b",
+              choices[0].scale == 1.3f && choices[0].merge == false && choices[1].name == "a" && !choices[1].scale &&
+              choices[2].name == "b",
           "LoRA choices: start-up ones first (their name wins), then the directory's by name");
     using mako::server::resolve_loras;
-    const auto got = resolve_loras(R"([{"name":"b","scale":-0.5},{"name":"style.safetensors"}])", choices);
-    check(got == mako::image::Loras{{(dir / "b.safetensors").string(), -0.5f}, {"/elsewhere/style.safetensors", 1.0f}},
-          "a request's LoRAs: files and scales in order, scale 1 by default, names with or without .safetensors");
+    const auto got =
+        resolve_loras(R"([{"name":"b","scale":-0.5,"merge":true},{"name":"style.safetensors"}])", choices);
+    check(got == mako::image::Loras{{(dir / "b.safetensors").string(), -0.5f, true},
+                                    {"/elsewhere/style.safetensors", 1.0f, false}},
+          "a request's LoRAs: files, scales and merge choices in order, scale 1 and the start-up merge choice by "
+          "default, names with or without .safetensors");
     check(resolve_loras("[]", choices).empty(), "an empty list: no LoRAs");
     for (const char* bad : {R"({"name":"a"})", R"([{"name":"../a"}])", R"([{"name":"../a.safetensors"}])",
                             R"([{"name":"notes"}])", R"([{"name":"a"},{"name":"a.safetensors"}])", R"([{"scale":1}])",
                             R"([{"name":"a","scale":"1"}])", R"([{"name":"a","scale":11}])",
-                            R"([{"name":"a"},{"name":"a"}])"}) {
+                            R"([{"name":"a"},{"name":"a"}])", R"([{"name":"a","merge":1}])"}) {
         bool threw = false;
         try {
             resolve_loras(bad, choices);
@@ -110,8 +121,21 @@ void lora_checks()
 
 } // namespace
 
+void lora_spec_checks()
+{
+    using mako::image::parse_lora;
+    using L = mako::image::Lora;
+    check(parse_lora("a.safetensors") == L{"a.safetensors", 1.0f, std::nullopt}, "--lora FILE");
+    check(parse_lora("a.safetensors:0.7") == L{"a.safetensors", 0.7f, std::nullopt}, "--lora FILE:SCALE");
+    check(parse_lora("a.safetensors:0.7:merge") == L{"a.safetensors", 0.7f, true}, "--lora FILE:SCALE:merge");
+    check(parse_lora("a.safetensors:unmerged") == L{"a.safetensors", 1.0f, false}, "--lora FILE:unmerged");
+    check(parse_lora("dir:x/a.safetensors") == L{"dir:x/a.safetensors", 1.0f, std::nullopt},
+          "--lora with a colon in the path and no scale");
+}
+
 int main()
 {
+    lora_spec_checks();
     lora_checks();
     image_model_checks();
     std::println("{}", failures ? "FAILED" : "image_models: all cases pass");

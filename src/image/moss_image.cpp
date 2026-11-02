@@ -3,9 +3,11 @@
 #include "log/log.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <format>
 #include <stdexcept>
 
@@ -63,6 +65,8 @@ MossImage::MossImage(const std::string& dir, mtl::Context& ctx, const Options& o
     if (latent_width() != kLatentWidth)
         throw std::runtime_error("vae: tokens not 128 values");
     load_transformer(open_files(opts.transformer.empty() ? dir + "/transformer" : opts.transformer));
+    if (!opts.adapter.empty())
+        load_adapter(opts.adapter);
     // Frequencies as the reference derives them (its stored copy may be rounded).
     for (uint32_t i = 0; i < 16; ++i)
         bands_[i] = 1.0f / std::pow(10000.0f, float(i) / 16.0f);
@@ -133,7 +137,7 @@ void MossImage::load_transformer(const safetensors::Files& f)
         B.down = mat(b + "proj.ffn_down.weight");
         blocks_.push_back(std::move(B));
     }
-    if (blocks_.size() <= kSkip || text_blocks_.empty())
+    if (blocks_.size() <= default_skip_blocks().back() || text_blocks_.empty())
         throw std::runtime_error(std::format("transformer: {} blocks, {} text blocks", blocks_.size(),
                                              text_blocks_.size()));
     const uint32_t nb = uint32_t(blocks_.size());
@@ -149,12 +153,137 @@ void MossImage::load_transformer(const safetensors::Files& f)
     log::info("MOSS-Image transformer: {} blocks, {} text blocks", nb, text_blocks_.size());
 }
 
+void MossImage::load_adapter(const std::string& dir)
+{
+    for (const char* f : {"lora.safetensors", "time_embedding.safetensors", "dataspace.safetensors"})
+        if (!std::filesystem::exists(dir + "/" + f))
+            throw std::runtime_error(std::format("adapter {}: no {}", dir, f));
+    const auto te = open_files(dir + "/time_embedding.safetensors");
+    t1f_ = floats(te, "time_embedding.0.weight");
+    t1bf_ = floats(te, "time_embedding.0.bias");
+    t2f_ = floats(te, "time_embedding.2.weight");
+    t2bf_ = floats(te, "time_embedding.2.bias");
+    if (t1f_.size() != uint64_t(kDim) * kTimeDim || t2f_.size() != uint64_t(kDim) * kDim || t1bf_.size() != kDim ||
+        t2bf_.size() != kDim)
+        throw std::runtime_error("adapter: the time embedding's shapes");
+    // Its modulation biases, with its time path's t = 1 folded in.
+    for (auto [name, t] : {std::pair{"shared_block_modulation.bias", &mod_b_}, {"video_head_modulation.bias", &head_mod_b_}}) {
+        const auto v = floats(te, name);
+        if (t->type != gguf::Type::F32 || v.size() != t->dims[0])
+            throw std::runtime_error(std::format("adapter: {} does not fit", name));
+        std::memcpy(static_cast<char*>(t->buf->contents()) + t->off, v.data(), v.size() * 4);
+    }
+    const auto dsf = open_files(dir + "/dataspace.safetensors");
+    ds_.q = floats(dsf, "latent_mix.Q");
+    ds_.codes = floats(dsf, "step_codes");
+    if (ds_.q.size() != uint64_t(kLatentWidth) * kLatentWidth || ds_.codes.empty())
+        throw std::runtime_error("adapter: the data-space sampler's shapes");
+    add_lora(dir + "/lora.safetensors", 1.0f);
+    log::info("MOSS-Image adapter {}: {} steps (timesteps {})", dir, ds_.codes.size(),
+              [&] {
+                  std::string s;
+                  for (float c : ds_.codes)
+                      s += std::format("{}{:g}", s.empty() ? "" : ", ", c);
+                  return s;
+              }());
+}
+
+bool MossImage::lora_side(const std::string& module, std::span<const float> a, std::span<const float> b, uint32_t rank,
+                          float s)
+{
+    unsigned i = 0;
+    int used = 0;
+    if (std::sscanf(module.c_str(), "layers.%u.%n", &i, &used) != 1 || used <= 0 || i >= blocks_.size())
+        return false;
+    const std::string_view rest = std::string_view(module).substr(size_t(used));
+    int which = -1;
+    uint32_t row0 = 0;
+    if (rest == "proj.qkv" || rest == "proj.q")
+        which = kSideQkv;
+    else if (rest == "proj.k")
+        which = kSideQkv, row0 = kDim;
+    else if (rest == "proj.v")
+        which = kSideQkv, row0 = 2 * kDim;
+    else if (rest == "proj.o")
+        which = kSideO;
+    else if (rest == "proj.ffn_up_gate")
+        which = kSideUpGate;
+    else if (rest == "proj.ffn_down")
+        which = kSideDown;
+    if (which < 0)
+        return false;
+    if (side_.empty())
+        side_.resize(blocks_.size());
+    Side::Piece p{row0, uint32_t(b.size() / rank), rank, {a.begin(), a.end()}, {b.begin(), b.end()}};
+    for (float& v : p.b)
+        v *= s;
+    side_[i][which].pieces.push_back(std::move(p));
+    return true;
+}
+
+void MossImage::lora_merged()
+{
+    // Rounded to nearest even.
+    auto bf16 = [](float f) {
+        uint32_t u;
+        std::memcpy(&u, &f, 4);
+        return uint16_t((u + 0x7fff + ((u >> 16) & 1)) >> 16);
+    };
+    for (uint32_t il = 0; il < side_.size(); ++il)
+        for (int w = 0; w < kSides; ++w) {
+            Side& S = side_[il][w];
+            if (S.pieces.empty())
+                continue;
+            const Block& B = blocks_[il];
+            const Tensor& W = w == kSideQkv ? B.q : w == kSideO ? B.o : w == kSideUpGate ? B.up_gate : B.down;
+            const uint32_t k = uint32_t(W.dims[0]), n = uint32_t(W.dims[1]);
+            uint32_t R = 0;
+            for (const auto& p : S.pieces)
+                R += p.rank;
+            R = (R + 63) / 64 * 64;
+            std::vector<uint16_t> down(uint64_t(R) * k), up(uint64_t(n) * R);
+            uint32_t r0 = 0;
+            for (const auto& p : S.pieces) {
+                for (uint32_t r = 0; r < p.rank; ++r)
+                    for (uint32_t j = 0; j < k; ++j)
+                        down[uint64_t(r0 + r) * k + j] = bf16(p.a[uint64_t(r) * k + j]);
+                for (uint32_t row = 0; row < p.rows; ++row)
+                    for (uint32_t r = 0; r < p.rank; ++r)
+                        up[uint64_t(p.row0 + row) * R + r0 + r] = bf16(p.b[uint64_t(row) * p.rank + r]);
+                r0 += p.rank;
+            }
+            Side::Group g;
+            g.down = reserve(down.size() * 2, gguf::Type::BF16, {k, R});
+            std::memcpy(static_cast<char*>(g.down.buf->contents()) + g.down.off, down.data(), down.size() * 2);
+            g.up = reserve(up.size() * 2, gguf::Type::BF16, {R, n});
+            std::memcpy(static_cast<char*>(g.up.buf->contents()) + g.up.off, up.data(), up.size() * 2);
+            g.R = R;
+            S.groups.push_back(std::move(g));
+            S.pieces.clear();
+            S.pieces.shrink_to_fit();
+        }
+}
+
 std::vector<float> MossImage::prompt_embeddings(const std::string& prompt)
 {
     auto ids = tok_->encode(templated(prompt), true);
     if (ids.size() > 4096) // the reference's longest
         ids.resize(4096);
     return encode_text(ids, 0, {}, true);
+}
+
+float MossImage::top_sigma(uint32_t) const
+{
+    const float t = 1 - 1e-4f;
+    return kShift * t / (1 + (kShift - 1) * t);
+}
+
+void MossImage::set_skip_blocks(std::span<const uint32_t> blocks)
+{
+    for (uint32_t b : blocks)
+        if (b >= blocks_.size())
+            throw std::runtime_error(std::format("skip_blocks: {} blocks, none numbered {}", blocks_.size(), b));
+    skip_.assign(blocks.begin(), blocks.end());
 }
 
 std::vector<float> MossImage::sigmas(uint32_t steps, uint32_t, std::optional<float>) const
@@ -304,14 +433,32 @@ std::vector<float> MossImage::step(std::span<const float> latents, float sigma, 
         tpf[kTimeDim / 2 + i] = float(std::sin(arg));
     }
 
+    if (!t1f_.empty()) { // the adapter's F32 time path
+        std::vector<float> h(D);
+        for (uint32_t o = 0; o < D; ++o) {
+            double a = t1bf_[o];
+            for (uint32_t j = 0; j < kTimeDim; ++j)
+                a += double(t1f_[uint64_t(o) * kTimeDim + j]) * tpf[j];
+            h[o] = float(a / (1 + std::exp(-a)));
+        }
+        auto* g = static_cast<float*>(tg->contents());
+        for (uint32_t o = 0; o < D; ++o) {
+            double a = t2bf_[o];
+            for (uint32_t j = 0; j < D; ++j)
+                a += double(t2f_[uint64_t(o) * D + j]) * h[j];
+            g[o] = float(a);
+        }
+    }
     MTL::CommandBuffer* cb = ctx_.queue()->commandBuffer();
     cur_cb_ = cb;
     MTL::ComputeCommandEncoder* enc = encoder(cb, 0, -1);
-    proj(enc, t1_, tp, 0, temb, 0, 1);
-    bias(enc, temb, t1_b_, D, 1);
-    unary(enc, "silu", temb, D);
-    proj(enc, t2_, temb, 0, tg, 0, 1);
-    bias(enc, tg, t2_b_, D, 1);
+    if (t1f_.empty()) {
+        proj(enc, t1_, tp, 0, temb, 0, 1);
+        bias(enc, temb, t1_b_, D, 1);
+        unary(enc, "silu", temb, D);
+        proj(enc, t2_, temb, 0, tg, 0, 1);
+        bias(enc, tg, t2_b_, D, 1);
+    }
     proj(enc, mod_, tg, 0, tm, 0, 1);
     bias(enc, tm, mod_b_, 6 * D, 1);
     probe(enc, "mod", -1, tm, 6 * D);
@@ -359,14 +506,28 @@ std::vector<float> MossImage::step(std::span<const float> latents, float sigma, 
         enc->dispatchThreads(MTL::Size(D, T, 1), MTL::Size(256, 1, 1));
         after(enc, "scale_add");
     };
+    // A projection's unmerged LoRAs, added to its output (n wide).
+    auto side = [&](uint32_t il, int w, MTL::Buffer* in, MTL::Buffer* out, uint32_t n) {
+        if (side_.empty())
+            return;
+        for (const Side::Group& g : side_[il][w].groups) {
+            MTL::Buffer* lo = scratch("d_side_lo", uint64_t(Tg) * g.R * 4);
+            MTL::Buffer* sy = scratch("d_side_y", uint64_t(Tg) * n * 4);
+            proj(enc, g.down, in, 0, lo, 0, Tg);
+            proj(enc, g.up, lo, 0, sy, 0, Tg);
+            const uint32_t aa[2] = {n, n};
+            dispatch(enc, "add_rows", {out, sy}, aa, sizeof(aa), MTL::Size(n, T, 1), MTL::Size(256, 1, 1));
+        }
+    };
     for (uint32_t il = 0; il < nb; ++il) {
-        if (slot == 1 && il == kSkip)
+        if (slot == 1 && std::ranges::contains(skip_, il))
             continue;
         const Block& B = blocks_[il];
         cur_layer_ = il;
         const uint64_t mo = uint64_t(il) * 6 * D;
         rms(mods, mo, mo + D, T);
         proj(enc, B.q, xn, 0, qkv, 0, Tg);
+        side(il, kSideQkv, xn, qkv, 3 * D);
         heads_norm(enc, qkv, 3 * D, 0, kHeads, T, q_pad, cs, 0, 1, B.norm_q, kEps, 0, qh);
         heads_norm(enc, qkv, 3 * D, D, kHeads, T, k_pad, cs, 0, 1, B.norm_k, kEps, 0, kh);
         if (k_pad > T) {
@@ -377,12 +538,15 @@ std::vector<float> MossImage::step(std::span<const float> latents, float sigma, 
         heads(enc, qkv, 3 * D, 2 * D, kHeads, T, k_pad, nullptr, 0, vh);
         attention(enc, qh, kh, vh, att, T, q_pad, T, k_pad, kHeads, kHeads, 0, 0);
         proj(enc, B.o, att, 0, y, 0, Tg);
+        side(il, kSideO, att, y, D);
         gated(mo + 2 * D);
         rms(mods, mo + 3 * D, mo + 4 * D, T);
         proj(enc, B.up_gate, xn, 0, gu, 0, Tg);
+        side(il, kSideUpGate, xn, gu, uint32_t(2 * nff));
         uint32_t f = uint32_t(nff);
         dispatch(enc, "situ_rows", {gu, ffm}, &f, sizeof(f), MTL::Size(f, Tg, 1), MTL::Size(256, 1, 1));
         proj(enc, B.down, ffm, 0, y, 0, Tg);
+        side(il, kSideDown, ffm, y, D);
         gated(mo + 5 * D);
         probe(enc, "block", int(il), x, uint64_t(T) * D);
     }

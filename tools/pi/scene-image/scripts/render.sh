@@ -1,20 +1,21 @@
 #!/bin/sh
 # Renders an image with mako_image_serve's /v1/images/generations and saves it as a PNG.
-#   render.sh [--model NAME] [--lora NAME[:SCALE]]... [--no-loras] [--steps N] [--negative TEXT] [--guidance F]
-#             [--sampler NAME] WIDTHxHEIGHT "prompt"
+#   render.sh [--model NAME] [--lora NAME[:SCALE][:merge|:unmerged]]... [--no-loras] [--steps N] [--negative TEXT]
+#             [--guidance F] [--sampler NAME] WIDTHxHEIGHT "prompt"
 #   render.sh [options] --layout DRAFT     (MOSS-Image: a layout draft, see layout.py, as a file, - for standard input or
 #                                           the JSON itself; the size comes from the draft)
 # --model renders with that image model (default: the server's); --lora (repeatable) with these LoRAs in place of the
-# model's defaults; --no-loras with none; --steps N denoising steps (0: the model's own count; default: the model's
-# setting); --negative what the image should not show (a second transformer pass a step); --guidance its scale
-# (default: the model's); --sampler euler or euler_a (SDXL models only; default: the model's).
+# model's defaults (:merge into the weights or :unmerged beside them; default the model's way); --no-loras with none;
+# --steps N denoising steps (0: the model's own count; default: the model's setting); --negative what the image should
+# not show (a second transformer pass a step); --guidance its scale (default: the model's); --sampler euler, euler_a
+# (SDXL models only) or er_sde (default: the model's).
 # MAKO_IMAGE_URL (mako_image_serve; default http://127.0.0.1:8082/v1), MAKO_IMAGE_API_KEY (when the server wants
 # one), MAKO_IMAGE_DIR (default ~/Pictures/mako), MAKO_IMAGE_OPEN=0 (not opened in the image viewer). Prints the saved
 # file's path.
 set -eu
 usage() {
-    echo "usage: render.sh [--model NAME] [--lora NAME[:SCALE]]... [--no-loras] [--steps N] [--negative TEXT]" >&2
-    echo "                 [--guidance F] [--sampler NAME] WIDTHxHEIGHT \"prompt\"" >&2
+    echo "usage: render.sh [--model NAME] [--lora NAME[:SCALE][:merge|:unmerged]]... [--no-loras] [--steps N]" >&2
+    echo "                 [--negative TEXT] [--guidance F] [--sampler NAME] WIDTHxHEIGHT \"prompt\"" >&2
     echo "       render.sh [options] --layout DRAFT.json|-|'{...}'" >&2
     exit 2
 }
@@ -110,11 +111,17 @@ if os.environ["SAMPLER"]:
 if os.environ["LORAS"]:
     b["loras"] = []
     for spec in filter(None, os.environ["LORAS"].split("\n")):
+        lora = {}
+        for suffix, merge in ((":merge", True), (":unmerged", False)):
+            if spec.endswith(suffix):
+                spec, lora["merge"] = spec[: -len(suffix)], merge
+                break
         name, _, scale = spec.rpartition(":")
         try:
-            b["loras"].append({"name": name, "scale": float(scale)} if name else {"name": spec})
+            lora.update({"name": name, "scale": float(scale)} if name else {"name": spec})
         except ValueError:
-            b["loras"].append({"name": spec})
+            lora["name"] = spec
+        b["loras"].append(lora)
 print(json.dumps(b))')
 status=$(curl -sS -o "$tmp" -w '%{http_code}' --max-time 1800 "$url/images/generations" \
     -H 'Content-Type: application/json' ${MAKO_IMAGE_API_KEY:+-H "Authorization: Bearer $MAKO_IMAGE_API_KEY"} \

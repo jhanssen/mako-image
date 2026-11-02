@@ -107,8 +107,8 @@ int main(int argc, char** argv)
     mako::server::ImageResidency residency(std::move(borrower));
     const auto load = [&](const mako::server::ImageModel& m, const mako::image::Loras& loras) {
         auto e = mako::image::Engine::open(m.dir, ctx, m.options);
-        for (const auto& [path, scale] : loras)
-            e->add_lora(path, scale);
+        for (const auto& l : loras)
+            e->add_lora(l);
         return e;
     };
     if (!so.image_models.empty())

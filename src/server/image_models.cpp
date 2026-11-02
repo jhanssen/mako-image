@@ -37,6 +37,21 @@ bool holds_model(const fs::path& d)
 
 } // namespace
 
+std::optional<std::vector<uint32_t>> parse_skip_blocks(std::string_view json)
+{
+    glz::generic v;
+    if (glz::read_json(v, json) || !v.is_array())
+        return std::nullopt;
+    std::vector<uint32_t> out;
+    for (const auto& b : v.get_array()) {
+        if (!b.is_number() || b.get_number() < 0 || b.get_number() > 1000 ||
+            b.get_number() != std::floor(b.get_number()))
+            return std::nullopt;
+        out.push_back(uint32_t(b.get_number()));
+    }
+    return out;
+}
+
 ImageModel load_image_model(const std::string& dir, const std::string& name)
 {
     const fs::path base = fs::absolute(fs::path(dir)).lexically_normal();
@@ -71,6 +86,8 @@ ImageModel load_image_model(const std::string& dir, const std::string& name)
             m.options.transformer = resolve(base, *v);
         if (auto v = str("text_encoder"))
             m.options.text_encoder = resolve(base, *v);
+        if (auto v = str("adapter"))
+            m.options.adapter = resolve(base, *v);
         if (auto v = str("description"))
             m.description = *v;
         if (auto v = str("prompting"))
@@ -89,22 +106,41 @@ ImageModel load_image_model(const std::string& dir, const std::string& name)
         if (auto v = str("sampler")) {
             m.sampler = image::parse_sampler(*v);
             if (!m.sampler)
-                throw std::runtime_error(cfg.string() + ": sampler must be euler or euler_a");
+                throw std::runtime_error(cfg.string() + ": sampler must be euler, euler_a or er_sde");
+        }
+        if (j.contains("skip_blocks")) {
+            std::string text;
+            (void)glz::write_json(j["skip_blocks"], text);
+            m.skip_blocks = parse_skip_blocks(text);
+            if (!m.skip_blocks)
+                throw std::runtime_error(cfg.string() + ": skip_blocks must be an array of block numbers");
         }
         if (j.contains("loras")) {
             if (!j["loras"].is_object())
                 throw std::runtime_error(cfg.string() + ": loras must be an object of name: scale");
             for (const auto& [n, s] : j["loras"].get_object()) {
-                if (!s.is_number())
-                    throw std::runtime_error(std::format("{}: the scale of LoRA {} must be a number", cfg.string(), n));
+                image::Lora l;
+                if (s.is_number()) {
+                    l.scale = float(s.get_number());
+                } else if (s.is_object() && (!s.contains("scale") || s["scale"].is_number()) &&
+                           (!s.contains("merge") || s["merge"].is_boolean())) {
+                    if (s.contains("scale"))
+                        l.scale = float(s["scale"].get_number());
+                    if (s.contains("merge"))
+                        l.merge = s["merge"].get_boolean();
+                } else {
+                    throw std::runtime_error(std::format(
+                        "{}: LoRA {} must be a scale or {{\"scale\": F, \"merge\": true|false}}", cfg.string(), n));
+                }
                 const fs::path f = fs::path(lora_dir) / (n.ends_with(".safetensors") ? n : n + ".safetensors");
                 if (!fs::exists(f))
                     throw std::runtime_error(std::format("{}: no LoRA {}", cfg.string(), f.string()));
-                m.loras.emplace_back(f.string(), float(s.get_number()));
+                l.path = f.string();
+                m.loras.push_back(std::move(l));
             }
         }
     }
-    for (const std::string* p : {&m.options.transformer, &m.options.text_encoder})
+    for (const std::string* p : {&m.options.transformer, &m.options.text_encoder, &m.options.adapter})
         if (!p->empty() && !fs::exists(*p))
             throw std::runtime_error(std::format("{}: {} does not exist", name, *p));
     if (!fs::is_directory(m.dir))
@@ -116,6 +152,15 @@ ImageModel load_image_model(const std::string& dir, const std::string& name)
         throw std::runtime_error(std::format("{}: {} holds no image model mako knows", name, m.dir));
     if (m.sampler == image::Sampler::euler_ancestral && !image::Engine::predicts_noise(m.family))
         throw std::runtime_error(std::format("{}: euler_a needs a model that predicts the noise", name));
+    if (!m.options.adapter.empty() && ((m.guidance && *m.guidance != 1.0f) || m.sampler))
+        throw std::runtime_error(std::format("{}: an adapter runs its own sampler, without guidance", name));
+    if (!m.options.adapter.empty() && m.family != "MOSS-Image")
+        throw std::runtime_error(std::format("{}: adapters are for MOSS-Image", name));
+    for (const auto& l : m.loras)
+        if (l.merge == false && !image::Engine::keeps_loras_unmerged(m.family))
+            throw std::runtime_error(std::format("{}: {} keeps no LoRA unmerged", name, m.family));
+    if (m.skip_blocks && !m.skip_blocks->empty() && !image::Engine::skips_blocks(m.family))
+        throw std::runtime_error(std::format("{}: {} has no blocks to skip", name, m.family));
     return m;
 }
 
@@ -143,10 +188,10 @@ std::vector<LoraChoice> lora_choices(const image::Loras& defaults, const std::st
     namespace fs = std::filesystem;
     std::vector<LoraChoice> out;
     auto known = [&](const std::string& name) { return std::ranges::contains(out, name, &LoraChoice::name); };
-    for (const auto& [path, scale] : defaults) {
-        const std::string name = fs::path(path).stem().string();
+    for (const auto& l : defaults) {
+        const std::string name = fs::path(l.path).stem().string();
         if (!known(name))
-            out.push_back({name, path, scale});
+            out.push_back({name, l.path, l.scale, l.merge});
     }
     if (dir.empty())
         return out;
@@ -158,7 +203,7 @@ std::vector<LoraChoice> lora_choices(const image::Loras& defaults, const std::st
     std::ranges::sort(files);
     for (const auto& f : files)
         if (!known(f.stem().string()))
-            out.push_back({f.stem().string(), f.string(), std::nullopt});
+            out.push_back({f.stem().string(), f.string(), std::nullopt, std::nullopt});
     return out;
 }
 
@@ -230,8 +275,14 @@ image::Loras resolve_loras(std::string_view json, const std::vector<LoraChoice>&
                 throw std::invalid_argument(std::format("\"{}\": scale must be a number from -10 to 10", name));
             scale = float(e["scale"].get_number());
         }
+        std::optional<bool> merge = it->merge;
+        if (e.contains("merge") && !e["merge"].is_null()) {
+            if (!e["merge"].is_boolean())
+                throw std::invalid_argument(std::format("\"{}\": merge must be true or false", name));
+            merge = e["merge"].get_boolean();
+        }
         names.push_back(name);
-        out.emplace_back(it->path, scale);
+        out.push_back({it->path, scale, merge});
     }
     return out;
 }

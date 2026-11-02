@@ -3,7 +3,8 @@
 They run from their original files (BF16 safetensors and configs), not a GGUF: the published GGUFs hold only the
 transformer, as F16 (BF16 values below ~6.1e-5 lose bits there) or quantized. They share `image::Engine`: the text
 encoder (Qwen3-VL, or Qwen3.5's hybrid), the VAE decoder (Qwen-Image's or FLUX.2's), the flow-matching Euler schedule,
-the denoising loop with guidance, and LoRA merging. `Engine::open` picks the model from `model_index.json`, or takes
+the denoising loop with guidance and its samplers (Euler, Euler ancestral, ER-SDE in `image::ErSde`, a data-space
+adapter's), and LoRA merging. `Engine::open` picks the model from `model_index.json`, or takes
 Anima's single-file layout (`diffusion_models/`, `text_encoders/`, `vae/`) or an SDXL checkpoint (one file). The text
 encoders' BF16 GEMMs also multiply what rounding their activations to bfloat left out (a second GEMM): the first token's
 outlier channels grow to thousands and cancel in the last layers, and with activations in bfloat alone its final state
@@ -47,7 +48,16 @@ came out a few percent off.
 - VAE: FLUX.2's small decoder: 32 channels, 8x, the transformer's tokens its 2x2 patches normalized by a batch norm's
   statistics; group norms, a single-head mid attention.
 - Schedule: shift 5 on a linear grid, snapped to the 1000 training levels; 50 steps. Guidance 3 always, against an
-  empty negative prompt unless one is given, that pass skipping block 22, as the reference runs it.
+  empty negative prompt unless one is given, that pass skipping block 22, as the reference runs it (other blocks:
+  `skip_blocks`).
+- LoRAs on the blocks' projections stay unmerged by default: each file's factors side by side per projection (down
+  [R][k] and up [n][R] in BF16, R its ranks padded to 64), two GEMMs and an add after the projection. Distillation
+  LoRAs change the weights by 0.02-0.06% of their norm, below BF16's rounding (about 0.4%): merged, they come out
+  79-97% off their change.
+- Data-space adapters (`Options::adapter`): the LoRA unmerged, the time embedding's MLP and the two modulation biases
+  replaced by the adapter's F32 ones (the MLP run on the CPU, a 256 -> 3072 -> 3072 product a step), and the
+  sampler: from one noise z and x0 = 0, each step runs the transformer on z + Q x0 (Q mixes the 128 latent channels)
+  at the next step code's timestep and takes x0 = z - its output; no guidance.
 
 ### Anima
 

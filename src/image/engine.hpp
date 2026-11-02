@@ -20,14 +20,29 @@ namespace mako::image {
 struct Options {
     std::string text_encoder; // another directory of the text encoder's safetensors (the same model's, changed)
     std::string transformer;  // another file or directory of the transformer's weights
+    // A data-space distillation adapter's directory (MOSS-Image): lora.safetensors (kept unmerged),
+    // time_embedding.safetensors (F32 time path) and dataspace.safetensors (its sampler).
+    std::string adapter;
     gpu::Telemetry telemetry = gpu::Telemetry::off;
 };
 
-// How a step moves the latents: Euler, or Euler ancestral (towards a lower noise level, then fresh noise up to the
-// next; models that predict the noise only).
-enum class Sampler { euler, euler_ancestral };
-// "euler" or "euler_a" (also "euler_ancestral"); nullopt for another name.
+// A LoRA file, its scale, and whether it is merged into the weights or kept beside them (Engine::add_lora).
+struct Lora {
+    std::string path;
+    float scale = 1.0f;
+    std::optional<bool> merge; // unset: the model's way
+    bool operator==(const Lora&) const = default;
+};
+// LoRAs, added in order.
+using Loras = std::vector<Lora>;
+
+// How a step moves the latents: Euler, Euler ancestral (towards a lower noise level, then fresh noise up to the
+// next; models that predict the noise only), or ER-SDE (image::ErSde).
+enum class Sampler { euler, euler_ancestral, er_sde };
+// "euler", "euler_a" (also "euler_ancestral") or "er_sde"; nullopt for another name.
 std::optional<Sampler> parse_sampler(std::string_view name);
+// The name parse_sampler() reads.
+const char* sampler_name(Sampler s);
 
 // An image model from its original files (a directory with model_index.json, text_encoder/, transformer/, vae/,
 // scheduler/): the parts the models share, the Qwen3-VL text encoder, the VAE decoder, the flow-matching schedule and
@@ -40,6 +55,9 @@ public:
     static std::string family(const std::string& dir);
     // Whether a family's models predict the noise (predicts_noise()).
     static bool predicts_noise(const std::string& family) { return family == "SDXL"; }
+    // Whether a family's negative prompt pass can leave blocks out (Request::skip_blocks).
+    static bool skips_blocks(const std::string& family) { return family == "MOSS-Image"; }
+    static bool keeps_loras_unmerged(const std::string& family) { return family == "MOSS-Image"; }
 
     virtual ~Engine() = default;
 
@@ -60,6 +78,8 @@ public:
     // step() predicts the noise (the latents are image + sigma * noise, the start noise scaled to the first level)
     // rather than a flow's velocity (latents (1 - sigma) * image + sigma * noise).
     virtual bool predicts_noise() const { return false; }
+    // The blocks the negative prompt's pass leaves out by default (only models that skip blocks have any).
+    virtual std::vector<uint32_t> default_skip_blocks() const { return {}; }
 
     struct Request {
         std::string prompt;
@@ -73,6 +93,9 @@ public:
         std::optional<std::string> negative;
         std::optional<float> guidance; // its scale (unset: the model's)
         std::optional<Sampler> sampler; // unset: the model's
+        // Transformer blocks the negative prompt's pass leaves out (zero-based; skips_blocks() models only); unset:
+        // the model's.
+        std::optional<std::vector<uint32_t>> skip_blocks;
         std::function<void(uint32_t step, uint32_t steps)> progress;
     };
     // Text to image: RGBA [height][width][4] in [-1, 1].
@@ -105,16 +128,26 @@ public:
     // shift, stretched to end at its terminal value). A model's own schedule may have fewer.
     virtual std::vector<float> sigmas(uint32_t steps, uint32_t tokens,
                                       std::optional<float> terminal = std::nullopt) const;
+    // A flow model's noise level a hundredth of a percent of the way down its schedule's shift, where ER-SDE starts in
+    // place of 1.
+    virtual float top_sigma(uint32_t tokens) const;
 
-    // Merges a LoRA into the transformer's weights for good: W += scale * (alpha / rank) * B A for each matrix it
-    // adapts (rounded back to BF16), b += scale * diff_b for whole bias differences. Keys as Diffusers, PEFT or
-    // ComfyUI name them, or Kohya's (lora_unet_ and the module path with underscores); alpha from the adapter's .alpha
-    // tensors, else its PEFT config in the metadata, else the rank. Returns the tensors adapted; throws on a file it
-    // cannot use (keys it does not know are an error).
-    uint32_t add_lora(const std::string& path, float scale = 1.0f);
+    // Adds a LoRA to the transformer for good: W += scale * (alpha / rank) * B A for each matrix it adapts, merged
+    // (rounded back to the weights' BF16) or, where the model can (keeps_loras_unmerged()), kept beside the weight and
+    // applied on every pass; b += scale * diff_b for whole bias differences. merge unset: the model's way (unmerged
+    // where it can). Keys as Diffusers, PEFT or ComfyUI name them, or Kohya's (lora_unet_ and the module path with
+    // underscores); alpha from the adapter's .alpha tensors, else its PEFT config in the metadata, else the rank.
+    // Returns the tensors adapted; throws on a file it cannot use (keys it does not know are an error).
+    uint32_t add_lora(const std::string& path, float scale = 1.0f, std::optional<bool> merge = std::nullopt);
+    uint32_t add_lora(const Lora& l) { return add_lora(l.path, l.scale, l.merge); }
+    // Whether LoRAs can stay unmerged (Lora::merge false): the family's (keeps_loras_unmerged(family)).
+    virtual bool keeps_loras_unmerged() const { return false; }
     const text::Tokenizer& tokenizer() const { return *tok_; }
 
 protected:
+    // Which blocks the negative prompt's pass leaves out from here on; throws on blocks the model does not have, or
+    // any for a model that skips none.
+    virtual void set_skip_blocks(std::span<const uint32_t> blocks);
     // dir's text encoder (or opts.text_encoder), VAE, scheduler and tokenizer (processor/ or tokenizer/).
     Engine(const std::string& dir, mtl::Context& ctx, const Options& opts);
     Engine(const Parts& parts, mtl::Context& ctx, const Options& opts);
@@ -153,6 +186,20 @@ protected:
     virtual float* lora_cpu(const std::string&, uint32_t& /*rows*/, uint32_t& /*cols*/) { return nullptr; }
     // After a LoRA is merged (what the model computed from the weights before is stale).
     virtual void lora_merged() {}
+    // Keeps W += s * B A for `module` unmerged, applied beside W on every pass (a: [rank][k], b: [rows][rank]); false:
+    // merge it. For changes smaller than the weights' rounding, which merging into them would lose.
+    virtual bool lora_side(const std::string& /*module*/, std::span<const float> /*a*/, std::span<const float> /*b*/,
+                           uint32_t /*rank*/, float /*s*/)
+    {
+        return false;
+    }
+    // A data-space sampler (an adapter's): each step runs the model on z + Q x0 at the next code's timestep and takes
+    // x0 = z - its output, from one fixed noise z and x0 = 0; no guidance.
+    struct DataSpace {
+        std::vector<float> q;     // [latent_width()][latent_width()], output channel first
+        std::vector<float> codes; // the steps' timesteps (1000: all noise)
+    };
+    virtual const DataSpace* data_space() const { return nullptr; }
 
     Tensor upload(const safetensors::Files& files, const std::string& name, bool matrix);
     // A tensor's values as F32 (from F32, F16 or BF16).
@@ -191,6 +238,7 @@ protected:
         double base_seq = 256, max_seq = 4096, base_shift = 0.5, max_shift = 1.15, terminal = 0;
         std::optional<double> mu; // a fixed shift (distilled models) instead of one by image size
     } sched_;
+    double shift_mu(uint32_t tokens) const; // the schedule's shift for an image of `tokens` tokens
     std::string dir_;
 
 private:
@@ -267,10 +315,8 @@ private:
 // literal parentheses.
 std::vector<std::pair<std::string, float>> prompt_weights(const std::string& prompt);
 
-// LoRA files and their scales, merged in order.
-using Loras = std::vector<std::pair<std::string, float>>;
-
-// "FILE" or "FILE:SCALE" (the scale a number after the last colon). Throws std::invalid_argument.
-std::pair<std::string, float> parse_lora(const std::string& spec);
+// "FILE", "FILE:SCALE", then optionally ":merge" or ":unmerged" (the scale a number after its colon). Throws
+// std::invalid_argument.
+Lora parse_lora(const std::string& spec);
 
 } // namespace mako::image

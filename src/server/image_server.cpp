@@ -133,11 +133,25 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
     if (body.contains("sampler") && !body["sampler"].is_null()) {
         sampler = body["sampler"].is_string() ? image::parse_sampler(body["sampler"].get_string()) : std::nullopt;
         if (!sampler)
-            return fail(400, "sampler must be euler or euler_a", "invalid_request_error");
+            return fail(400, "sampler must be euler, euler_a or er_sde", "invalid_request_error");
         if (sampler == image::Sampler::euler_ancestral && !image::Engine::predicts_noise(model.family))
             return fail(400, std::format("sampler: euler_a needs a model that predicts the noise ({} does not)",
                                          model.name),
                         "invalid_request_error");
+    }
+    if (!model.options.adapter.empty() && ((guidance && *guidance != 1.0f) || sampler))
+        return fail(400, std::format("{} runs its adapter's sampler, without guidance: no guidance_scale or sampler",
+                                     model.name),
+                    "invalid_request_error");
+    std::optional<std::vector<uint32_t>> skip_blocks = model.skip_blocks;
+    if (body.contains("skip_blocks") && !body["skip_blocks"].is_null()) {
+        std::string text;
+        (void)glz::write_json(body["skip_blocks"], text);
+        skip_blocks = parse_skip_blocks(text);
+        if (!skip_blocks)
+            return fail(400, "skip_blocks must be an array of block numbers", "invalid_request_error");
+        if (!skip_blocks->empty() && !image::Engine::skips_blocks(model.family))
+            return fail(400, std::format("skip_blocks: {} has no blocks to skip", model.name), "invalid_request_error");
     }
     uint32_t steps = model.steps;
     if (body.contains("steps") && !body["steps"].is_null()) {
@@ -155,6 +169,9 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
         } catch (const std::exception& e) {
             return fail(400, std::format("loras: {}", e.what()), "invalid_request_error");
         }
+        for (const auto& l : loras)
+            if (l.merge == false && !image::Engine::keeps_loras_unmerged(model.family))
+                return fail(400, std::format("loras: {} keeps no LoRA unmerged", model.name), "invalid_request_error");
     }
     bool jpeg = false;
     if (body.contains("output_format") && body["output_format"].is_string()) {
@@ -170,16 +187,17 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
     const auto slot = std::shared_ptr<void>(nullptr, [this](void*) { --in_flight; });
     const std::string id = std::format("img-{}", next_id.fetch_add(1) + 1);
     std::string lora_names;
-    for (const auto& [path, scale] : loras)
-        lora_names += std::format("{}{} {:g}", lora_names.empty() ? ", LoRAs " : ", ",
-                                  std::filesystem::path(path).stem().string(), scale);
+    for (const auto& l : loras)
+        lora_names += std::format("{}{} {:g}{}", lora_names.empty() ? ", LoRAs " : ", ",
+                                  std::filesystem::path(l.path).stem().string(), l.scale,
+                                  !l.merge ? "" : *l.merge ? " merged" : " unmerged");
     log::info("{}: {} image{} {}x{} with {}{}{}, waiting for the image model", id, n, n > 1 ? "s" : "", width, height,
               model.name, negative ? ", a negative prompt" : "", lora_names);
     std::string data = "[";
     try {
         std::string key = model.key();
-        for (const auto& [path, scale] : loras)
-            key += std::format("|{}:{}", path, scale);
+        for (const auto& l : loras)
+            key += std::format("|{}:{}:{}", l.path, l.scale, !l.merge ? "" : *l.merge ? "merge" : "unmerged");
         auto engine = residency.acquire(key, "image model " + model.name, [&] { return load(model, loras); });
         std::random_device rd;
         for (uint32_t i = 0; i < n; ++i) {
@@ -193,6 +211,7 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
             r.negative = negative;
             r.guidance = guidance;
             r.sampler = sampler;
+            r.skip_blocks = skip_blocks;
             auto last = std::chrono::steady_clock::now();
             const auto t0 = last;
             r.progress = [&](uint32_t step, uint32_t steps) {
@@ -209,8 +228,8 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
             if (!jpeg) {
                 image::Provenance prov = engine->provenance(r);
                 prov.model = model.name;
-                for (const auto& [path, scale] : loras)
-                    prov.loras.emplace_back(std::filesystem::path(path).stem().string(), scale);
+                for (const auto& l : loras)
+                    prov.loras.push_back({std::filesystem::path(l.path).stem().string(), l.scale, l.merge});
                 bytes = image::with_provenance(std::move(bytes), prov);
             }
             log::info("{}: image {} of {} in {:.1f} s (seed {})", id, i + 1, n,
@@ -276,11 +295,18 @@ void ImageServer::Impl::image_model_list(httplib::Response& res)
         if (m.guidance)
             data += std::format(R"(,"guidance":{:g})", *m.guidance);
         if (m.sampler)
-            data += std::format(R"(,"sampler":"{}")", *m.sampler == image::Sampler::euler ? "euler" : "euler_a");
+            data += std::format(R"(,"sampler":"{}")", image::sampler_name(*m.sampler));
+        if (m.skip_blocks) {
+            std::string b;
+            for (uint32_t i : *m.skip_blocks)
+                b += std::format("{}{}", b.empty() ? "" : ",", i);
+            data += std::format(R"(,"skip_blocks":[{}])", b);
+        }
         std::string l;
-        for (const auto& [path, scale] : m.loras)
-            l += std::format(R"({}{{"name":{},"scale":{:g}}})", l.empty() ? "" : ",",
-                             json_quoted(std::filesystem::path(path).stem().string()), scale);
+        for (const auto& x : m.loras)
+            l += std::format(R"({}{{"name":{},"scale":{:g}{}}})", l.empty() ? "" : ",",
+                             json_quoted(std::filesystem::path(x.path).stem().string()), x.scale,
+                             x.merge ? std::format(R"(,"merge":{})", *x.merge) : "");
         data += std::format(R"(,"loras":[{}]}})", l);
     }
     res.set_content(std::format(R"({{"object":"list","data":[{}]}})", data), "application/json");
@@ -301,6 +327,8 @@ void ImageServer::Impl::loras(const httplib::Request& req, httplib::Response& re
         data += std::format(R"({}{{"name":{})", data.empty() ? "" : ",", json_quoted(c.name));
         if (c.scale)
             data += std::format(R"(,"default_scale":{:g})", *c.scale);
+        if (c.merge)
+            data += std::format(R"(,"default_merge":{})", *c.merge);
         const auto notes = lora_notes(c.path);
         if (!notes.trigger.empty())
             data += std::format(R"(,"trigger":{})", json_quoted(notes.trigger));

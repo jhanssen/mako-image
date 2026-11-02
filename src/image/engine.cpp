@@ -1,6 +1,7 @@
 #include "image/engine.hpp"
 
 #include "image/anima.hpp"
+#include "image/er_sde.hpp"
 
 #include "log/log.hpp"
 #include "gguf/read_pool.hpp"
@@ -181,7 +182,20 @@ std::optional<Sampler> parse_sampler(std::string_view name)
         return Sampler::euler;
     if (name == "euler_a" || name == "euler_ancestral")
         return Sampler::euler_ancestral;
+    if (name == "er_sde")
+        return Sampler::er_sde;
     return std::nullopt;
+}
+
+const char* sampler_name(Sampler s)
+{
+    return s == Sampler::euler ? "euler" : s == Sampler::euler_ancestral ? "euler_a" : "er_sde";
+}
+
+void Engine::set_skip_blocks(std::span<const uint32_t> blocks)
+{
+    if (!blocks.empty())
+        throw std::runtime_error(std::format("{}: no blocks to skip", name()));
 }
 
 std::string Engine::family(const std::string& dir)
@@ -217,6 +231,8 @@ std::unique_ptr<Engine> Engine::open(const std::string& dir, mtl::Context& ctx, 
         return std::make_unique<Krea2>(dir, ctx, opts);
     if (cls == "MOSSImagePipeline")
         return std::make_unique<MossImage>(dir, ctx, opts);
+    if (!opts.adapter.empty())
+        throw std::runtime_error(std::format("{}: adapters are for MOSS-Image", dir));
     throw std::runtime_error(std::format("{}: an image model mako does not know ({})", dir, cls.empty() ? "?" : cls));
 }
 
@@ -416,11 +432,22 @@ void Engine::load_text(const std::string& tdir)
         }
 }
 
+double Engine::shift_mu(uint32_t tokens) const
+{
+    const double m = (sched_.max_shift - sched_.base_shift) / (sched_.max_seq - sched_.base_seq);
+    return sched_.mu ? *sched_.mu : double(tokens) * m + (sched_.base_shift - m * sched_.base_seq);
+}
+
+float Engine::top_sigma(uint32_t tokens) const
+{
+    const double mu = shift_mu(tokens), t = 1 - 1e-4;
+    return float(std::exp(mu) / (std::exp(mu) + (1.0 / t - 1.0)));
+}
+
 std::vector<float> Engine::sigmas(uint32_t steps, uint32_t tokens, std::optional<float> terminal) const
 {
     const double term = terminal ? double(*terminal) : sched_.terminal;
-    const double m = (sched_.max_shift - sched_.base_shift) / (sched_.max_seq - sched_.base_seq);
-    const double mu = sched_.mu ? *sched_.mu : double(tokens) * m + (sched_.base_shift - m * sched_.base_seq);
+    const double mu = shift_mu(tokens);
     std::vector<float> s(steps);
     for (uint32_t i = 0; i < steps; ++i) {
         // linspace(1, 1 / steps, steps), then exp(mu) / (exp(mu) + 1 / t - 1), in float as the scheduler does.
@@ -442,9 +469,16 @@ std::vector<float> Engine::generate(const Request& r)
     if (r.width % 32 || r.height % 32 || !r.width || !r.height)
         throw std::runtime_error("width and height must be multiples of 32");
     const uint32_t h = r.height / 16, w = r.width / 16, N = h * w;
+    const DataSpace* ds = data_space();
+    if (ds && r.sampler)
+        throw std::runtime_error(std::format("{}: the adapter has its own sampler", name()));
+    if (ds && r.guidance && *r.guidance != 1.0f)
+        throw std::runtime_error(std::format("{}: the adapter runs without guidance", name()));
     const Sampler sampler = r.sampler.value_or(default_sampler());
     if (sampler == Sampler::euler_ancestral && !predicts_noise())
         throw std::runtime_error(std::format("{}: Euler a needs a model that predicts the noise", name()));
+    const auto skip = r.skip_blocks.value_or(default_skip_blocks());
+    set_skip_blocks(skip);
     const auto prompt = prompt_embeddings(r.prompt);
     std::vector<float> x(uint64_t(N) * lat_);
     std::mt19937_64 rng(r.seed);
@@ -456,6 +490,29 @@ std::vector<float> Engine::generate(const Request& r)
     } else {
         for (float& v : x)
             v = nd(rng);
+    }
+    if (ds) {
+        const uint32_t steps = r.steps ? r.steps : default_steps();
+        if (steps > ds->codes.size())
+            throw std::runtime_error(std::format("the adapter has {} steps", ds->codes.size()));
+        begin(prompt, h, w);
+        const uint32_t L = lat_;
+        std::vector<float> x0(x.size()), in(x.size());
+        for (uint32_t i = 0; i < steps; ++i) {
+            for (uint32_t t = 0; t < N; ++t)
+                for (uint32_t o = 0; o < L; ++o) {
+                    float s = 0;
+                    for (uint32_t c = 0; c < L; ++c)
+                        s += ds->q[o * L + c] * x0[uint64_t(t) * L + c];
+                    in[uint64_t(t) * L + o] = x[uint64_t(t) * L + o] + s;
+                }
+            const auto v = step(in, ds->codes[i] / 1000.0f);
+            for (size_t j = 0; j < x0.size(); ++j)
+                x0[j] = x[j] - v[j];
+            if (r.progress)
+                r.progress(i + 1, steps);
+        }
+        return decode(x0, h, w);
     }
     const auto sig = sigmas(r.steps ? r.steps : default_steps(), N, r.terminal);
     const uint32_t steps = uint32_t(sig.size() - 1);
@@ -472,14 +529,29 @@ std::vector<float> Engine::generate(const Request& r)
     const auto negative = scale == 1.0f ? std::nullopt : r.negative ? r.negative : default_negative();
     if (negative)
         begin(prompt_embeddings(*negative), h, w, 1);
+    std::optional<ErSde> er;
+    std::vector<float> noise;
+    if (sampler == Sampler::er_sde) {
+        er.emplace(sig, !predicts_noise(), top_sigma(N));
+        noise.resize(x.size());
+    }
     for (uint32_t i = 0; i < steps; ++i) {
-        auto v = step(x, sig[i]);
+        const float s = er ? er->sigma(i) : sig[i];
+        auto v = step(x, s);
         if (negative) {
-            const auto neg = step(x, sig[i], 1);
+            const auto neg = step(x, s, 1);
             for (size_t j = 0; j < v.size(); ++j)
                 v[j] = neg[j] + scale * (v[j] - neg[j]);
         }
-        if (sampler == Sampler::euler_ancestral) {
+        if (er) {
+            // The image the step sees: the latents less the noise (or velocity) times the level.
+            for (size_t j = 0; j < v.size(); ++j)
+                v[j] = x[j] - s * v[j];
+            if (sig[i + 1] > 0)
+                for (float& n : noise)
+                    n = nd(rng);
+            er->step(i, x, v, noise);
+        } else if (sampler == Sampler::euler_ancestral) {
             // Down to the level whose noise, with fresh noise of the remainder added, makes the next one's.
             const double from = sig[i], to = sig[i + 1];
             const double up = std::min(to, std::sqrt(to * to * (from * from - to * to) / (from * from)));
@@ -508,12 +580,19 @@ Provenance Engine::provenance(const Request& r) const
     p.height = r.height;
     p.seed = r.seed;
     p.steps = r.steps ? r.steps : default_steps();
-    p.sampler = r.sampler.value_or(default_sampler()) == Sampler::euler ? "euler" : "euler_a";
+    if (data_space()) {
+        p.sampler = "data_space";
+        p.guidance = 1;
+        return p;
+    }
+    p.sampler = sampler_name(r.sampler.value_or(default_sampler()));
     p.guidance = r.guidance.value_or(default_guidance());
     if (p.guidance != 1.0f)
         p.negative = r.negative ? r.negative : default_negative();
     if (!p.negative)
         p.guidance = 1.0f;
+    else
+        p.skip_blocks = r.skip_blocks.value_or(default_skip_blocks());
     return p;
 }
 
@@ -1275,8 +1354,10 @@ std::vector<float> Engine::decode(std::span<const float> latents, uint32_t h, ui
     return img;
 }
 
-uint32_t Engine::add_lora(const std::string& path, float scale)
+uint32_t Engine::add_lora(const std::string& path, float scale, std::optional<bool> merge)
 {
+    if (merge == false && !keeps_loras_unmerged())
+        throw std::runtime_error(std::format("{}: {} keeps no LoRA unmerged", path, name()));
     auto file = safetensors::File::open(path);
     if (!file)
         throw std::runtime_error(file.error());
@@ -1383,7 +1464,7 @@ uint32_t Engine::add_lora(const std::string& path, float scale)
     if (!unknown.empty())
         throw std::runtime_error(std::format("{}: {} keys {} does not adapt, e.g. {}", path, unknown.size(), name(),
                                              unknown.front()));
-    uint32_t done = 0, rank_seen = 0;
+    uint32_t done = 0, rank_seen = 0, side = 0;
     for (const auto& [m, p] : mods) {
         const LoraTarget tg = lora_target(m);
         if (!tg.w) { // a small matrix on the CPU: W += s * B A there
@@ -1413,6 +1494,12 @@ uint32_t Engine::add_lora(const std::string& path, float scale)
         if (p.alpha)
             a = read_floats(*file, *p.alpha).front();
         const auto av = read_floats(*file, *p.a), bv = read_floats(*file, *p.b);
+        if (merge != true && lora_side(m, av, bv, rank, float(double(scale) * a / double(rank)))) {
+            ++done;
+            ++side;
+            rank_seen = rank;
+            continue;
+        }
         MTL::Buffer* ab = scratch("l_a", av.size() * 4);
         MTL::Buffer* bb = scratch("l_b", bv.size() * 4);
         std::memcpy(ab->contents(), av.data(), av.size() * 4);
@@ -1451,8 +1538,8 @@ uint32_t Engine::add_lora(const std::string& path, float scale)
     if (!done)
         throw std::runtime_error(path + ": no LoRA weights in it");
     lora_merged();
-    log::info("LoRA {}: {} tensors adapted (rank {}, alpha {}), scale {}", path, done, rank_seen,
-              alpha ? std::format("{}", *alpha) : std::string("= rank"), scale);
+    log::info("LoRA {}: {} tensors adapted ({} kept unmerged; rank {}, alpha {}), scale {}", path, done, side,
+              rank_seen, alpha ? std::format("{}", *alpha) : std::string("= rank"), scale);
     return done;
 }
 
@@ -1538,18 +1625,28 @@ std::vector<std::pair<std::string, float>> prompt_weights(const std::string& pro
     return out;
 }
 
-std::pair<std::string, float> parse_lora(const std::string& spec)
+Lora parse_lora(const std::string& spec)
 {
-    const size_t colon = spec.rfind(':');
-    if (colon != std::string::npos && colon + 1 < spec.size()) {
+    Lora l;
+    l.path = spec;
+    for (const auto& [suffix, merge] : {std::pair{":merge", true}, {":unmerged", false}})
+        if (l.path.ends_with(suffix)) {
+            l.path.resize(l.path.size() - std::strlen(suffix));
+            l.merge = merge;
+            break;
+        }
+    const size_t colon = l.path.rfind(':');
+    if (colon != std::string::npos && colon + 1 < l.path.size()) {
         char* end = nullptr;
-        const float v = std::strtof(spec.c_str() + colon + 1, &end);
-        if (end && *end == '\0')
-            return {spec.substr(0, colon), v};
+        const float v = std::strtof(l.path.c_str() + colon + 1, &end);
+        if (end && *end == '\0') {
+            l.scale = v;
+            l.path.resize(colon);
+        }
     }
-    if (spec.empty())
+    if (l.path.empty())
         throw std::invalid_argument("names no LoRA file");
-    return {spec, 1.0f};
+    return l;
 }
 
 } // namespace mako::image

@@ -30,6 +30,7 @@ public:
     std::vector<float> step(std::span<const float> latents, float sigma, uint32_t slot = 0) override;
     // Shift 3 over 1000 levels, `steps` of them evenly spaced from the top, then 0.
     std::vector<float> sigmas(uint32_t steps, uint32_t tokens, std::optional<float> terminal) const override;
+    float top_sigma(uint32_t) const override { return 3.0f * (1 - 1e-4f) / (1.0f + 2.0f * (1 - 1e-4f)); }
 
     // A prompt's parts and their weights: "(text)" times 1.1, "(text:w)" w, nested ones multiplied, "\(" and "\)"
     // literal parentheses.

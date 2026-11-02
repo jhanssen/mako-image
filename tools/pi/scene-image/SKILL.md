@@ -212,7 +212,7 @@ uses unless told otherwise, at the scale shown.
 
 - `--model NAME`: the image model (default: the server's default).
 - `--lora NAME[:SCALE]` (repeatable): exactly these LoRAs in place of the model's defaults; `--no-loras`: none (see
-  "LoRAs").
+  "LoRAs"). A `:merge` or `:unmerged` suffix overrides how the server adds it; leave it off unless the user asks.
 - `--steps N`: denoising steps, 0 to 100; 0 is the model's own count; without it the step count the server set for the
   model applies (lower with a speed LoRA). More steps take longer. Leave it out unless the user asks for more or fewer
   steps, or the speed LoRA a model's low step count is set for is gone.
@@ -226,8 +226,9 @@ uses unless told otherwise, at the scale shown.
   Qwen-Image 4, Krea 2 Turbo 2, MOSS-Image 3, Anima 4, SDXL 6). Too high gives flat, oversaturated or broken images
   (Krea 2 Turbo from 3). Change it only when the user asks, or by 1 at a time when a negative prompt shows too little or
   too much.
-- `--sampler euler|euler_a`: SDXL models only (default Euler a, which adds fresh noise each step, so a seed's
-  image changes with the step count). Leave it out unless the user asks.
+- `--sampler euler|euler_a|er_sde`: euler_a for SDXL models only (their default; it adds fresh noise each step, so a
+  seed's image changes with the step count); er_sde for any model (also adds noise each step). Leave it out unless the
+  user asks.
 - `--layout DRAFT`: a MOSS-Image layout in place of size and prompt (see "Layouts").
 
 The environment, set by the user: `MAKO_IMAGE_URL` and `MAKO_IMAGE_API_KEY` (the server), `MAKO_IMAGE_DIR` (where

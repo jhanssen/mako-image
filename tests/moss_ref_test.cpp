@@ -6,6 +6,9 @@
 //            every pass's prediction (the negative prompt's skipping a block)
 //   vae      the VAE decoder on the reference's final latents
 //   pipeline the prompt to the image (the reference's starting noise)
+//   lora     a made-up LoRA (rank 16 on every projection of three blocks, far above BF16's rounding) added unmerged
+//            twice at 0.5, then merged at -1: the output must come back to the one without it (what is left, ~2e-3,
+//            is rounding: it stays put as the LoRA grows, where a fault in the unmerged path would grow with it)
 //   moss_ref_test <model dir> <reference dir> <mode>
 #include "image/moss_image.hpp"
 #include "mtl/context.hpp"
@@ -21,8 +24,11 @@
 #include <iterator>
 #include <map>
 #include <print>
+#include <random>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 namespace {
 
@@ -181,6 +187,59 @@ int main(int argc, char** argv)
             const Diff d = diff(it->second, want_s, width);
             std::println("  {:4} {}: rel error {:.2e}, lowest row cosine {:.5f}", "", name, d.rel, d.min_cos);
         }
+    } else if (mode == "lora") {
+        engine.begin(read_f32(ref / "text.f32"), g, g, 0);
+        const auto lat = transposed(read_f32(ref / "c0_latents.f32"), 128, N);
+        const float sigma = float(manifest["sigmas"].get_array()[0].get_number());
+        const auto base = engine.step(lat, sigma, 0);
+        // The made-up LoRA's file: F32 factors, no alpha (scale 1).
+        const fs::path file = fs::temp_directory_path() / std::format("moss_lora_test_{}.safetensors", getpid());
+        {
+            std::mt19937 rng(7);
+            std::normal_distribution<float> nd;
+            const uint32_t rank = 16;
+            std::string header = "{";
+            std::vector<float> data;
+            auto put = [&](const std::string& name, uint32_t rows, uint32_t cols, float sd) {
+                header += std::format("{}\"{}\":{{\"dtype\":\"F32\",\"shape\":[{},{}],\"data_offsets\":[{},{}]}}",
+                                      header.size() > 1 ? "," : "", name, rows, cols, data.size() * 4,
+                                      (data.size() + uint64_t(rows) * cols) * 4);
+                for (uint64_t i = 0; i < uint64_t(rows) * cols; ++i)
+                    data.push_back(nd(rng) * sd);
+            };
+            for (uint32_t layer : {0u, 21u, 41u})
+                for (const auto& [m, k, n] : {std::tuple{"q", 3072u, 3072u}, {"k", 3072u, 3072u}, {"v", 3072u, 3072u},
+                                              {"o", 3072u, 3072u}, {"ffn_up_gate", 3072u, 16384u},
+                                              {"ffn_down", 8192u, 3072u}}) {
+                    const std::string p = std::format("diffusion_model.layers.{}.proj.{}.", layer, m);
+                    put(p + "lora_down.weight", rank, k, 1.0f / std::sqrt(float(k)));
+                    put(p + "lora_up.weight", n, rank, 0.3f);
+                }
+            header += "}";
+            header.resize((header.size() + 7) / 8 * 8, ' ');
+            std::ofstream out(file, std::ios::binary);
+            const uint64_t hn = header.size();
+            out.write(reinterpret_cast<const char*>(&hn), 8);
+            out << header;
+            out.write(reinterpret_cast<const char*>(data.data()), std::streamsize(data.size() * 4));
+        }
+        engine.add_lora(file.string(), 0.5f, false);
+        engine.add_lora(file.string(), 0.5f, false);
+        const auto with = engine.step(lat, sigma, 0);
+        engine.add_lora(file.string(), -1.0f, true);
+        const auto back = engine.step(lat, sigma, 0);
+        fs::remove(file);
+        double effect = 0, residual = 0, norm = 0;
+        for (size_t i = 0; i < base.size(); ++i) {
+            effect += double(with[i] - base[i]) * (with[i] - base[i]);
+            residual += double(back[i] - base[i]) * (back[i] - base[i]);
+            norm += double(base[i]) * base[i];
+        }
+        effect = std::sqrt(effect / norm);
+        residual = std::sqrt(residual / norm);
+        check(effect > 0.05 && residual < 0.05 * effect,
+              std::format("the LoRA moves the output by {:.3e} (relative), unmerged then merged back by {:.3e}", effect,
+                          residual));
     } else if (mode == "vae") {
         std::map<std::string, std::vector<float>> stages;
         engine.set_probe([&](const std::string& name, int layer, const float* data, size_t n) {

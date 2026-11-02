@@ -24,7 +24,8 @@ if os.environ["STATUS"] != "200" or "data" not in d:
 if not d["data"]:
     print("(no LoRAs)")
 for l in d["data"]:
-    print(l["name"] + (f"  (default, scale {l['default_scale']:g})" if "default_scale" in l else ""))
+    merge = {True: ", merged", False: ", unmerged"}.get(l.get("default_merge"), "")
+    print(l["name"] + (f"  (default, scale {l['default_scale']:g}{merge})" if "default_scale" in l else ""))
     if "trigger" in l:
         print(f"    trigger: {l['trigger']}")
     if "scale_range" in l:
