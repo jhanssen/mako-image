@@ -1293,7 +1293,7 @@ uint32_t Engine::add_lora(const std::string& path, float scale)
         const gguf::Tensor *a = nullptr, *b = nullptr, *alpha = nullptr;
     };
     std::map<std::string, Pair> mods;
-    std::map<std::string, const gguf::Tensor*> bias_diffs;
+    std::map<std::string, const gguf::Tensor*> bias_diffs, weight_diffs;
     std::vector<std::string> unknown;
     static constexpr std::pair<const char*, int> kSuffixes[] = {
         {".lora.down.weight", 0}, {".lora.up.weight", 1},  {".lora_down.weight", 0},       {".lora_up.weight", 1},
@@ -1307,6 +1307,10 @@ uint32_t Engine::add_lora(const std::string& path, float scale)
                 name.remove_prefix(std::strlen(p));
         if (name.ends_with(".diff_b")) {
             bias_diffs[std::string(name.substr(0, name.size() - 7))] = &t;
+            continue;
+        }
+        if (name.ends_with(".diff")) { // a whole weight's difference
+            weight_diffs[std::string(name.substr(0, name.size() - 5))] = &t;
             continue;
         }
         bool known = false;
@@ -1353,6 +1357,13 @@ uint32_t Engine::add_lora(const std::string& path, float scale)
         for (auto& [m, t] : bias_diffs)
             rb[dotted(m, [&](const std::string& c) { return lora_bias(c) != nullptr; })] = t;
         bias_diffs = std::move(rb);
+        std::map<std::string, const gguf::Tensor*> rw;
+        for (auto& [m, t] : weight_diffs)
+            rw[dotted(m, [&](const std::string& c) {
+                uint32_t r = 0, k = 0;
+                return lora_cpu(c, r, k) != nullptr;
+            })] = t;
+        weight_diffs = std::move(rw);
     }
     for (const auto& [m, p] : mods) {
         uint32_t r = 0, k = 0;
@@ -1363,6 +1374,11 @@ uint32_t Engine::add_lora(const std::string& path, float scale)
         const Tensor* b = lora_bias(m);
         if (!b || b->type != gguf::Type::F32 || t->elements() != b->dims[0])
             unknown.push_back(m + ".diff_b");
+    }
+    for (const auto& [m, t] : weight_diffs) {
+        uint32_t r = 0, k = 0;
+        if (!lora_cpu(m, r, k) || t->elements() != uint64_t(r) * k)
+            unknown.push_back(m + ".diff");
     }
     if (!unknown.empty())
         throw std::runtime_error(std::format("{}: {} keys {} does not adapt, e.g. {}", path, unknown.size(), name(),
@@ -1422,6 +1438,14 @@ uint32_t Engine::add_lora(const std::string& path, float scale)
         const auto d = read_floats(*file, *t);
         for (size_t i = 0; i < d.size(); ++i)
             dst[i] += scale * d[i];
+        ++done;
+    }
+    for (const auto& [m, t] : weight_diffs) {
+        uint32_t r = 0, k = 0;
+        float* w = lora_cpu(m, r, k);
+        const auto d = read_floats(*file, *t);
+        for (size_t i = 0; i < d.size(); ++i)
+            w[i] += scale * d[i];
         ++done;
     }
     if (!done)
