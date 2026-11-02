@@ -229,6 +229,8 @@ uses unless told otherwise, at the scale shown.
 - `--sampler euler|euler_a|er_sde`: euler_a for SDXL models only (their default; it adds fresh noise each step, so a
   seed's image changes with the step count); er_sde for any model (also adds noise each step). Leave it out unless the
   user asks.
+- `--skip-blocks LIST`: MOSS-Image only, the blocks its negative prompt's pass leaves out, e.g. `22,24` (`""` for
+  none; default the model's, 22). Leave it out unless the user asks.
 - `--layout DRAFT`: a MOSS-Image layout in place of size and prompt (see "Layouts").
 
 The environment, set by the user: `MAKO_IMAGE_URL` and `MAKO_IMAGE_API_KEY` (the server), `MAKO_IMAGE_DIR` (where
