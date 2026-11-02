@@ -7,6 +7,7 @@
 #include "image/krea2.hpp"
 #include "image/moss_image.hpp"
 #include "image/qwen_image.hpp"
+#include "image/sdxl.hpp"
 
 #include <glaze/glaze.hpp>
 
@@ -137,6 +138,35 @@ std::string wan_name(const std::string& n)
     return n;
 }
 
+// The original AutoencoderKL decoder names (single-file SDXL checkpoints) for the Diffusers layout's; up block i is
+// the original's levels - 1 - i.
+std::string ldm_name(const std::string& n, unsigned levels)
+{
+    auto res = [](const std::string& rest) {
+        return rest.starts_with("conv_shortcut") ? "nin_shortcut" + rest.substr(13) : rest;
+    };
+    static constexpr std::pair<const char*, const char*> kTop[] = {
+        {"decoder.conv_norm_out.", "decoder.norm_out."},
+        {"decoder.mid_block.resnets.0.", "decoder.mid.block_1."},
+        {"decoder.mid_block.resnets.1.", "decoder.mid.block_2."},
+        {"decoder.mid_block.attentions.0.group_norm.", "decoder.mid.attn_1.norm."},
+        {"decoder.mid_block.attentions.0.to_q", "decoder.mid.attn_1.q"},
+        {"decoder.mid_block.attentions.0.to_k", "decoder.mid.attn_1.k"},
+        {"decoder.mid_block.attentions.0.to_v", "decoder.mid.attn_1.v"},
+        {"decoder.mid_block.attentions.0.to_out.0", "decoder.mid.attn_1.proj_out"}};
+    for (const auto& [d, o] : kTop)
+        if (n.starts_with(d))
+            return o + res(n.substr(std::strlen(d)));
+    unsigned b = 0, j = 0;
+    int used = 0;
+    if (std::sscanf(n.c_str(), "decoder.up_blocks.%u.resnets.%u.%n", &b, &j, &used) == 2 && used > 0 && b < levels)
+        return std::format("decoder.up.{}.block.{}.", levels - 1 - b, j) + res(n.substr(size_t(used)));
+    if (used = 0; std::sscanf(n.c_str(), "decoder.up_blocks.%u.upsamplers.0.%n", &b, &used) == 1 && used > 0 &&
+                  b < levels)
+        return std::format("decoder.up.{}.upsample.", levels - 1 - b) + n.substr(size_t(used));
+    return n;
+}
+
 // The first Qwen-Image VAE's latent statistics, where its file comes without its config.
 constexpr float kWanMean[16] = {-0.7571, -0.7089, -0.9113, 0.1075, -0.1745, 0.9653, -0.1517, 1.5508,
                                 0.4134,  -0.0715, 0.5517,  -0.3632, -0.1922, -0.9497, 0.2503, -0.2921};
@@ -145,10 +175,19 @@ constexpr float kWanStd[16] = {2.8184, 1.4541, 2.3275, 2.6558, 1.2196, 1.7708, 2
 
 } // namespace
 
+std::optional<Sampler> parse_sampler(std::string_view name)
+{
+    if (name == "euler")
+        return Sampler::euler;
+    if (name == "euler_a" || name == "euler_ancestral")
+        return Sampler::euler_ancestral;
+    return std::nullopt;
+}
+
 std::string Engine::family(const std::string& dir)
 {
     if (!std::filesystem::exists(dir + "/model_index.json"))
-        return Anima::detect(dir) ? "Anima" : "";
+        return Anima::detect(dir) ? "Anima" : !Sdxl::checkpoint(dir).empty() ? "SDXL" : "";
     try {
         const auto j = read_json_file(dir + "/model_index.json");
         const std::string cls = j.contains("_class_name") && j["_class_name"].is_string() ? j["_class_name"].get_string()
@@ -167,6 +206,9 @@ std::unique_ptr<Engine> Engine::open(const std::string& dir, mtl::Context& ctx, 
     // Single-file parts in their own directories (diffusion_models/, text_encoders/, vae/): Anima's layout.
     if (!std::filesystem::exists(dir + "/model_index.json") && Anima::detect(dir))
         return std::make_unique<Anima>(dir, ctx, opts);
+    // A single-file SDXL checkpoint.
+    if (!std::filesystem::exists(dir + "/model_index.json") && !Sdxl::checkpoint(dir).empty())
+        return std::make_unique<Sdxl>(dir, ctx, opts);
     const auto j = read_json_file(dir + "/model_index.json");
     const std::string cls = j.contains("_class_name") && j["_class_name"].is_string() ? j["_class_name"].get_string() : "";
     if (cls == "QwenImage21Pipeline")
@@ -205,11 +247,11 @@ Engine::Engine(const Parts& parts, mtl::Context& ctx, const Options& opts)
     wan_ = vae_files_.find("decoder.conv1.weight") && !vae_files_.find("decoder.conv_in.weight");
     const std::string vcfg = parts.vae + "/config.json";
     const auto vj = std::filesystem::exists(vcfg) ? read_json_file(vcfg) : glz::generic{};
-    flux2_ = vj.contains("_class_name") && vj["_class_name"].is_string() &&
-             vj["_class_name"].get_string() == "AutoencoderKLFlux2";
-    if (flux2_) {
+    kl_ = vj.contains("_class_name") && vj["_class_name"].is_string() &&
+          vj["_class_name"].get_string() == "AutoencoderKLFlux2";
+    if (kl_) {
         // Tokens pack a 2x2 patch of the VAE's channels; its batch norm's statistics are per packed value.
-        load_vae_flux2();
+        load_vae_kl();
         z_ = post_quant_.cin;
         patch_ = 2;
         lat_ = z_ * 4;
@@ -264,6 +306,23 @@ Engine::Engine(const Parts& parts, mtl::Context& ctx, const Options& opts)
     if (!t)
         throw std::runtime_error(t.error());
     tok_ = std::move(*t);
+}
+
+Engine::Engine(mtl::Context& ctx, const Options& opts) : gpu::Runtime(ctx, opts.telemetry) {}
+
+void Engine::load_vae_ldm(const std::string& file, const std::string& prefix, float scale)
+{
+    vae_files_ = open_files(file);
+    ldm_ = prefix;
+    while (vae_files_.find(std::format("{}decoder.up.{}.block.0.conv1.weight", ldm_, ldm_levels_)))
+        ++ldm_levels_;
+    kl_ = true;
+    load_vae_kl();
+    z_ = post_quant_.cin;
+    patch_ = 2;
+    lat_ = z_ * 4;
+    lat_mean_.assign(lat_, 0.0f);
+    lat_std_.assign(lat_, 1.0f / scale);
 }
 
 void Engine::load_text(const std::string& tdir)
@@ -383,20 +442,30 @@ std::vector<float> Engine::generate(const Request& r)
     if (r.width % 32 || r.height % 32 || !r.width || !r.height)
         throw std::runtime_error("width and height must be multiples of 32");
     const uint32_t h = r.height / 16, w = r.width / 16, N = h * w;
+    const Sampler sampler = r.sampler.value_or(default_sampler());
+    if (sampler == Sampler::euler_ancestral && !predicts_noise())
+        throw std::runtime_error(std::format("{}: Euler a needs a model that predicts the noise", name()));
     const auto prompt = prompt_embeddings(r.prompt);
     std::vector<float> x(uint64_t(N) * lat_);
+    std::mt19937_64 rng(r.seed);
+    std::normal_distribution<float> nd;
     if (!r.noise.empty()) {
         if (r.noise.size() != x.size())
             throw std::runtime_error(std::format("noise must be [h * w][{}]", lat_));
         std::copy(r.noise.begin(), r.noise.end(), x.begin());
     } else {
-        std::mt19937_64 rng(r.seed);
-        std::normal_distribution<float> nd;
         for (float& v : x)
             v = nd(rng);
     }
     const auto sig = sigmas(r.steps ? r.steps : default_steps(), N, r.terminal);
     const uint32_t steps = uint32_t(sig.size() - 1);
+    // Noise at the schedule's top level, as the reference scales it there: sqrt(1 + sigma^2) (the image's own unit
+    // variance with the noise's).
+    if (predicts_noise()) {
+        const float s0 = std::sqrt(1.0f + sig[0] * sig[0]);
+        for (float& v : x)
+            v *= s0;
+    }
     begin(prompt, h, w);
     const float scale = r.guidance.value_or(default_guidance());
     // At scale 1 the guided velocity is the prompt's own: no negative pass.
@@ -410,9 +479,21 @@ std::vector<float> Engine::generate(const Request& r)
             for (size_t j = 0; j < v.size(); ++j)
                 v[j] = neg[j] + scale * (v[j] - neg[j]);
         }
-        const float dt = sig[i + 1] - sig[i];
-        for (size_t j = 0; j < x.size(); ++j)
-            x[j] += dt * v[j];
+        if (sampler == Sampler::euler_ancestral) {
+            // Down to the level whose noise, with fresh noise of the remainder added, makes the next one's.
+            const double from = sig[i], to = sig[i + 1];
+            const double up = std::min(to, std::sqrt(to * to * (from * from - to * to) / (from * from)));
+            const float dt = float(std::sqrt(to * to - up * up) - from);
+            for (size_t j = 0; j < x.size(); ++j)
+                x[j] += dt * v[j];
+            if (up > 0)
+                for (float& xv : x)
+                    xv += float(up) * nd(rng);
+        } else {
+            const float dt = sig[i + 1] - sig[i];
+            for (size_t j = 0; j < x.size(); ++j)
+                x[j] += dt * v[j];
+        }
         if (r.progress)
             r.progress(i + 1, steps);
     }
@@ -427,6 +508,7 @@ Provenance Engine::provenance(const Request& r) const
     p.height = r.height;
     p.seed = r.seed;
     p.steps = r.steps ? r.steps : default_steps();
+    p.sampler = r.sampler.value_or(default_sampler()) == Sampler::euler ? "euler" : "euler_a";
     p.guidance = r.guidance.value_or(default_guidance());
     if (p.guidance != 1.0f)
         p.negative = r.negative ? r.negative : default_negative();
@@ -438,19 +520,23 @@ Provenance Engine::provenance(const Request& r) const
 Engine::Tensor Engine::upload_rows(const safetensors::Files& files, std::span<const std::string> names)
 {
     uint64_t rows = 0, k = 0;
+    bool f16 = true;
     for (const auto& n : names) {
         const auto r = files.find(n);
-        if (!r || (r.tensor->type != gguf::Type::BF16 && r.tensor->type != gguf::Type::F32) ||
+        if (!r ||
+            (r.tensor->type != gguf::Type::BF16 && r.tensor->type != gguf::Type::F32 &&
+             r.tensor->type != gguf::Type::F16) ||
             r.tensor->dims.size() != 2 || (k && r.tensor->dims[0] != k))
-            throw std::runtime_error(n + ": missing, or not a BF16 or F32 matrix of the others' width");
+            throw std::runtime_error(n + ": missing, or not a BF16, F16 or F32 matrix of the others' width");
         k = r.tensor->dims[0];
         rows += r.tensor->dims[1];
+        f16 = f16 && r.tensor->type == gguf::Type::F16;
     }
-    Tensor t = reserve(rows * k * 2, gguf::Type::BF16, {k, rows});
+    Tensor t = reserve(rows * k * 2, f16 ? gguf::Type::F16 : gguf::Type::BF16, {k, rows});
     char* dst = static_cast<char*>(t.buf->contents()) + t.off;
     for (const auto& n : names) {
         const auto r = files.find(n);
-        if (r.tensor->type == gguf::Type::BF16) {
+        if (r.tensor->type == gguf::Type::BF16 || f16) {
             gguf::read_exact(r.file->fd(), dst, r.tensor->bytes, r.tensor->offset);
             dst += r.tensor->bytes;
         } else {
@@ -482,6 +568,14 @@ std::vector<float> Engine::floats(const safetensors::Files& files, const std::st
     if (!r)
         throw std::runtime_error("missing tensor " + name);
     return read_floats(*r.file, *r.tensor);
+}
+
+Engine::Tensor Engine::upload_f32(const safetensors::Files& files, const std::string& name)
+{
+    const auto f = floats(files, name);
+    Tensor t = reserve(f.size() * 4, gguf::Type::F32, {f.size()});
+    std::memcpy(static_cast<char*>(t.buf->contents()) + t.off, f.data(), f.size() * 4);
+    return t;
 }
 
 Engine::Tensor Engine::upload_plus_one(const safetensors::Files& files, const std::string& name)
@@ -786,6 +880,14 @@ Engine::Conv Engine::load_conv(const std::string& name, uint32_t k)
 
 Engine::Conv Engine::load_conv(std::span<const std::string> names, uint32_t k)
 {
+    std::vector<std::string> full;
+    for (const auto& n : names)
+        full.push_back(vk(n));
+    return load_conv(vae_files_, full, k);
+}
+
+Engine::Conv Engine::load_conv(const safetensors::Files& files, std::span<const std::string> names, uint32_t k)
+{
     struct Part {
         safetensors::Files::Ref r;
         uint32_t cout, kt;
@@ -794,11 +896,13 @@ Engine::Conv Engine::load_conv(std::span<const std::string> names, uint32_t k)
     Conv c;
     c.k = k;
     for (const std::string& name : names) {
-        const auto r = vae_files_.find(vk(name) + ".weight");
+        const auto r = files.find(name + ".weight");
         const size_t nd = r ? r.tensor->dims.size() : 0;
-        if (!r || !vae_files_.find(vk(name) + ".bias") ||
-            (r.tensor->type != gguf::Type::F32 && r.tensor->type != gguf::Type::BF16) || (nd != 2 && nd != 4 && nd != 5))
-            throw std::runtime_error(name + ": missing, or not an F32 or BF16 convolution");
+        if (!r || !files.find(name + ".bias") ||
+            (r.tensor->type != gguf::Type::F32 && r.tensor->type != gguf::Type::BF16 &&
+             r.tensor->type != gguf::Type::F16) ||
+            (nd != 2 && nd != 4 && nd != 5))
+            throw std::runtime_error(name + ": missing, or not an F32, F16 or BF16 convolution");
         // A linear layer is a 1x1 convolution.
         if (nd == 2 ? k != 1 : r.tensor->dims[0] != k || r.tensor->dims[1] != k)
             throw std::runtime_error(name + ": unexpected kernel size");
@@ -823,7 +927,8 @@ Engine::Conv Engine::load_conv(std::span<const std::string> names, uint32_t k)
     for (size_t pi = 0; pi < parts.size(); ++pi) {
         const Part& p = parts[pi];
         std::vector<float> row(uint64_t(cols) * p.kt);
-        std::vector<uint16_t> raw(p.r.tensor->type == gguf::Type::BF16 ? row.size() : 0);
+        const gguf::Type type = p.r.tensor->type;
+        std::vector<uint16_t> raw(type != gguf::Type::F32 ? row.size() : 0);
         for (uint32_t o = 0; o < p.cout; ++o) {
             if (raw.empty()) {
                 gguf::read_exact(p.r.file->fd(), row.data(), row.size() * 4,
@@ -832,8 +937,14 @@ Engine::Conv Engine::load_conv(std::span<const std::string> names, uint32_t k)
                 gguf::read_exact(p.r.file->fd(), raw.data(), raw.size() * 2,
                                  p.r.tensor->offset + uint64_t(o) * raw.size() * 2);
                 for (size_t i = 0; i < raw.size(); ++i) {
-                    const uint32_t bits = uint32_t(raw[i]) << 16;
-                    std::memcpy(&row[i], &bits, 4);
+                    if (type == gguf::Type::F16) {
+                        __fp16 h;
+                        std::memcpy(&h, &raw[i], 2);
+                        row[i] = float(h);
+                    } else {
+                        const uint32_t bits = uint32_t(raw[i]) << 16;
+                        std::memcpy(&row[i], &bits, 4);
+                    }
                 }
             }
             for (uint32_t i = 0; i < c.kpad; ++i) {
@@ -843,7 +954,7 @@ Engine::Conv Engine::load_conv(std::span<const std::string> names, uint32_t k)
                 dst[uint64_t(o0 + o) * c.kpad + i] = __fp16(v);
             }
         }
-        const auto b = floats(vae_files_, vk(names[pi]) + ".bias");
+        const auto b = floats(files, names[pi] + ".bias");
         std::copy(b.begin(), b.end(), bias + o0);
         o0 += p.cout;
     }
@@ -852,7 +963,7 @@ Engine::Conv Engine::load_conv(std::span<const std::string> names, uint32_t k)
 
 std::string Engine::vk(const std::string& name) const
 {
-    return wan_ ? wan_name(name) : name;
+    return wan_ ? wan_name(name) : !ldm_.empty() ? ldm_ + ldm_name(name, ldm_levels_) : name;
 }
 
 void Engine::load_vae()
@@ -898,17 +1009,18 @@ void Engine::load_vae()
     conv_out_ = load_conv("decoder.conv_out", 3);
 }
 
-void Engine::load_vae_flux2()
+void Engine::load_vae_kl()
 {
+    auto vec = [&](const std::string& n) { return upload_f32(vae_files_, vk(n)); };
     auto res = [&](const std::string& p) {
         Res r;
-        r.g1 = upload(vae_files_, p + ".norm1.weight", false);
-        r.b1 = upload(vae_files_, p + ".norm1.bias", false);
-        r.g2 = upload(vae_files_, p + ".norm2.weight", false);
-        r.b2 = upload(vae_files_, p + ".norm2.bias", false);
+        r.g1 = vec(p + ".norm1.weight");
+        r.b1 = vec(p + ".norm1.bias");
+        r.g2 = vec(p + ".norm2.weight");
+        r.b2 = vec(p + ".norm2.bias");
         r.c1 = load_conv(p + ".conv1", 3);
         r.c2 = load_conv(p + ".conv2", 3);
-        if (vae_files_.find(p + ".conv_shortcut.weight")) {
+        if (vae_files_.find(vk(p + ".conv_shortcut.weight"))) {
             r.sc = load_conv(p + ".conv_shortcut", 1);
             r.shortcut = true;
         }
@@ -919,34 +1031,49 @@ void Engine::load_vae_flux2()
     mid0_ = res("decoder.mid_block.resnets.0");
     mid1_ = res("decoder.mid_block.resnets.1");
     const std::string a = "decoder.mid_block.attentions.0.";
-    attn_g_ = upload(vae_files_, a + "group_norm.weight", false);
-    attn_b_ = upload(vae_files_, a + "group_norm.bias", false);
+    attn_g_ = vec(a + "group_norm.weight");
+    attn_b_ = vec(a + "group_norm.bias");
     const std::string qkv[3] = {a + "to_q", a + "to_k", a + "to_v"};
     qkv_ = load_conv(qkv, 1);
     attn_proj_ = load_conv(a + "to_out.0", 1);
     for (uint32_t i = 0;; ++i) {
         const std::string p = std::format("decoder.up_blocks.{}", i);
-        if (!vae_files_.find(p + ".resnets.0.conv1.weight"))
+        if (!vae_files_.find(vk(p + ".resnets.0.conv1.weight")))
             break;
         Up u;
-        for (uint32_t j = 0; vae_files_.find(std::format("{}.resnets.{}.conv1.weight", p, j)); ++j)
+        for (uint32_t j = 0; vae_files_.find(vk(std::format("{}.resnets.{}.conv1.weight", p, j))); ++j)
             u.res.push_back(res(std::format("{}.resnets.{}", p, j)));
         u.cin = u.res.front().c1.cin;
         u.cout = u.res.back().c2.cout;
-        if (vae_files_.find(p + ".upsamplers.0.conv.weight")) {
+        if (vae_files_.find(vk(p + ".upsamplers.0.conv.weight"))) {
             u.up = true;
             u.conv = load_conv(p + ".upsamplers.0.conv", 3);
         }
         ups_.push_back(std::move(u));
     }
-    out_g_ = upload(vae_files_, "decoder.conv_norm_out.weight", false);
-    out_b_ = upload(vae_files_, "decoder.conv_norm_out.bias", false);
+    out_g_ = vec("decoder.conv_norm_out.weight");
+    out_b_ = vec("decoder.conv_norm_out.bias");
     conv_out_ = load_conv("decoder.conv_out", 3);
 }
 
 void Engine::conv(MTL::ComputeCommandEncoder*& enc, const Conv& c, MTL::Buffer* x, uint32_t h, uint32_t w,
                   MTL::Buffer* y)
 {
+    if (c.stride == 2) { // a 3x3 to the half-size image, padding 1
+        const uint32_t oh = (h + 1) / 2, ow = (w + 1) / 2, rows = oh * ow;
+        const uint32_t chunk = std::max(256u, uint32_t((256ull << 20) / (uint64_t(c.kpad) * 2)) / 256 * 256);
+        MTL::Buffer* col = scratch("v_col", uint64_t(std::min(chunk, rows)) * c.kpad * 2);
+        for (uint32_t p0 = 0; p0 < rows; p0 += chunk) {
+            const uint32_t n = std::min(chunk, rows - p0);
+            const uint32_t a[7] = {h, w, c.cin, p0, n, c.kpad, ow};
+            dispatch(enc, "im2col3x3_s2", {x, col}, a, sizeof(a), MTL::Size(c.kpad, n, 1), MTL::Size(256, 1, 1));
+            gemm_->encode(enc, gguf::Type::F16, c.kpad, c.cout, n, c.w.buf, c.w.off, col, 0, y,
+                          uint64_t(p0) * c.cout * 4, 0, 0, true);
+            after(enc, "conv3x3_s2");
+        }
+        bias(enc, y, c.b, c.cout, rows);
+        return;
+    }
     const uint32_t rows = h * w;
     if (c.k == 1) {
         MTL::Buffer* in = x;
@@ -976,17 +1103,17 @@ void Engine::conv(MTL::ComputeCommandEncoder*& enc, const Conv& c, MTL::Buffer* 
 }
 
 void Engine::group_norm(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, const Tensor& g, const Tensor& b,
-                        MTL::Buffer* y, uint32_t rows, uint32_t c, bool silu)
+                        MTL::Buffer* y, uint32_t rows, uint32_t c, bool silu, float eps)
 {
     struct {
         uint32_t rows, c, groups, chunk;
         float eps;
         uint32_t silu;
-    } a{rows, c, 32, 256, 1e-6f, silu ? 1u : 0u};
+    } a{rows, c, 32, 256, eps, silu ? 1u : 0u};
     const uint32_t chunks = (rows + a.chunk - 1) / a.chunk;
     MTL::Buffer* part = scratch("gn_part", uint64_t(chunks) * c * 8);
     MTL::Buffer* stats = scratch("gn_stats", 32 * 8);
-    dispatch(enc, "gn_partial", {x, part}, &a, sizeof(a), MTL::Size(chunks, 1, 1), MTL::Size(c, 1, 1), false);
+    dispatch(enc, "gn_partial", {x, part}, &a, sizeof(a), MTL::Size(c, chunks, 1), MTL::Size(std::min(c, 256u), 1, 1));
     dispatch(enc, "gn_stats", {part, stats}, &a, sizeof(a), MTL::Size(32, 1, 1), MTL::Size(32, 1, 1));
     enc->setComputePipelineState(pso("gn_apply"));
     enc->setBuffer(x, 0, 0);
@@ -1013,9 +1140,9 @@ void Engine::res_block(MTL::ComputeCommandEncoder*& enc, const Res& r, MTL::Buff
                        MTL::Buffer* y, MTL::Buffer* t1, MTL::Buffer* t2)
 {
     const uint32_t rows = h * w, cin = r.c1.cin, cout = r.c2.cout;
-    norm_silu(enc, x, r.g1, t1, rows, cin, flux2_ ? &r.b1 : nullptr);
+    norm_silu(enc, x, r.g1, t1, rows, cin, kl_ ? &r.b1 : nullptr);
     conv(enc, r.c1, t1, h, w, t2);
-    norm_silu(enc, t2, r.g2, t2, rows, cout, flux2_ ? &r.b2 : nullptr);
+    norm_silu(enc, t2, r.g2, t2, rows, cout, kl_ ? &r.b2 : nullptr);
     conv(enc, r.c2, t2, h, w, y);
     if (r.shortcut) {
         conv(enc, r.sc, x, h, w, t1);
@@ -1077,7 +1204,7 @@ std::vector<float> Engine::decode(std::span<const float> latents, uint32_t h, ui
     {
         // Single-head attention over the pixels, channels wide.
         const uint32_t n = hh * ww, c = qkv_.cin;
-        if (flux2_)
+        if (kl_)
             group_norm(enc, b, attn_g_, attn_b_, t1, n, c, false);
         else
             norm(enc, b, &attn_g_, t1, n, c, c, 1e-24f / float(c));
@@ -1134,7 +1261,7 @@ std::vector<float> Engine::decode(std::span<const float> latents, uint32_t h, ui
         }
         probe(enc, "vae_up", int(&u - ups_.data()), x, uint64_t(hh) * ww * (u.up ? u.conv.cout : u.cout));
     }
-    norm_silu(enc, x, out_g_, t1, hh * ww, conv_out_.cin, flux2_ ? &out_b_ : nullptr);
+    norm_silu(enc, x, out_g_, t1, hh * ww, conv_out_.cin, kl_ ? &out_b_ : nullptr);
     conv(enc, conv_out_, t1, hh, ww, y);
     enc->endEncoding();
     finish(cb);
@@ -1263,7 +1390,8 @@ uint32_t Engine::add_lora(const std::string& path, float scale)
         }
         const uint32_t k = uint32_t(tg.w->dims[0]), rank = uint32_t(p.a->dims[1]);
         // A is [rank][k] and B [rows][rank] (row-major), so their contiguous dimensions come first here.
-        if (p.a->dims[0] != k || p.b->dims[0] != rank || p.b->dims[1] != tg.rows || tg.w->type != gguf::Type::BF16)
+        if (p.a->dims[0] != k || p.b->dims[0] != rank || p.b->dims[1] != tg.rows ||
+            (tg.w->type != gguf::Type::BF16 && tg.w->type != gguf::Type::F16))
             throw std::runtime_error(std::format("{}: {} does not fit the weight it adapts", path, m));
         double a = alpha.value_or(double(rank));
         if (p.alpha)
@@ -1277,7 +1405,7 @@ uint32_t Engine::add_lora(const std::string& path, float scale)
         MTL::CommandBuffer* cb = ctx_.queue()->commandBuffer();
         cur_cb_ = cb;
         MTL::ComputeCommandEncoder* enc = encoder(cb, 0, -1);
-        enc->setComputePipelineState(pso("lora_merge"));
+        enc->setComputePipelineState(pso(tg.w->type == gguf::Type::F16 ? "lora_merge_f16" : "lora_merge"));
         enc->setBuffer(tg.w->buf, tg.w->off + uint64_t(tg.row0) * k * 2, 0);
         enc->setBuffer(ab, 0, 1);
         enc->setBuffer(bb, 0, 2);
@@ -1298,9 +1426,92 @@ uint32_t Engine::add_lora(const std::string& path, float scale)
     }
     if (!done)
         throw std::runtime_error(path + ": no LoRA weights in it");
+    lora_merged();
     log::info("LoRA {}: {} tensors adapted (rank {}, alpha {}), scale {}", path, done, rank_seen,
               alpha ? std::format("{}", *alpha) : std::string("= rank"), scale);
     return done;
+}
+
+std::vector<std::pair<std::string, float>> prompt_weights(const std::string& prompt)
+{
+    // Escaped parentheses out of the way, as two unused bytes each.
+    std::string text;
+    for (size_t i = 0; i < prompt.size(); ++i)
+        if (prompt[i] == '\\' && i + 1 < prompt.size() && (prompt[i + 1] == '(' || prompt[i + 1] == ')')) {
+            text += prompt[i + 1] == ')' ? std::string("\0\1", 2) : std::string("\0\2", 2);
+            ++i;
+        } else {
+            text += prompt[i];
+        }
+    // Top-level groups: text, and parenthesized runs (an unclosed one runs to the end, unmatched ")" stay in text).
+    auto groups = [](const std::string& s) {
+        std::vector<std::string> out;
+        std::string cur;
+        int level = 0;
+        for (char c : s) {
+            if (c == '(') {
+                if (level == 0) {
+                    if (!cur.empty())
+                        out.push_back(cur);
+                    cur = "(";
+                } else {
+                    cur += c;
+                }
+                ++level;
+            } else if (c == ')') {
+                --level;
+                if (level == 0) {
+                    out.push_back(cur + ")");
+                    cur.clear();
+                } else {
+                    cur += c;
+                }
+            } else {
+                cur += c;
+            }
+        }
+        if (!cur.empty())
+            out.push_back(cur);
+        return out;
+    };
+    std::vector<std::pair<std::string, float>> out;
+    // Nesting deeper than kMaxDepth is text (each level copies the string, and the weights compound).
+    constexpr int kMaxDepth = 16;
+    auto parse = [&](auto& self, const std::string& s, float weight, int depth) -> void {
+        for (std::string x : groups(s)) {
+            if (x.size() >= 2 && x.front() == '(' && x.back() == ')' && depth < kMaxDepth) {
+                x = x.substr(1, x.size() - 2);
+                float w = weight * 1.1f;
+                if (const size_t colon = x.rfind(':'); colon != std::string::npos && colon > 0) {
+                    std::string num = x.substr(colon + 1);
+                    const size_t a = num.find_first_not_of(" \t\n\r"), b = num.find_last_not_of(" \t\n\r");
+                    num = a == std::string::npos ? "" : num.substr(a, b - a + 1);
+                    char* end = nullptr;
+                    const double v = num.empty() ? 0 : std::strtod(num.c_str(), &end);
+                    if (!num.empty() && end && *end == '\0' && std::isfinite(v)) {
+                        w = float(std::clamp(v, -100.0, 100.0));
+                        x = x.substr(0, colon);
+                    }
+                }
+                self(self, x, w, depth + 1);
+            } else {
+                out.emplace_back(x, weight);
+            }
+        }
+    };
+    parse(parse, text, 1.0f, 0);
+    for (auto& [s, w] : out) {
+        std::string u;
+        for (size_t i = 0; i < s.size(); ++i)
+            if (s[i] == '\0' && i + 1 < s.size() && (s[i + 1] == '\1' || s[i + 1] == '\2')) {
+                u += s[i + 1] == '\1' ? ')' : '(';
+                ++i;
+            } else {
+                u += s[i];
+            }
+        s = u;
+    }
+    return out;
 }
 
 std::pair<std::string, float> parse_lora(const std::string& spec)

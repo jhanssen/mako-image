@@ -37,6 +37,15 @@ foreach(m tokens text dit vae pipeline)
     add_test(NAME image_${m} COMMAND image_ref_test "${MAKO_QWEN_IMAGE}" "${MAKO_QWEN_IMAGE_REF}" ${m})
     set_tests_properties(image_${m} PROPERTIES LABELS image SKIP_RETURN_CODE 77)
 endforeach()
+# SDXL against the reference implementation's tensors (MAKO_SDXL_REF).
+add_executable(sdxl_ref_test sdxl_ref_test.cpp)
+target_link_libraries(sdxl_ref_test PRIVATE mako_imagegen mako_text glaze_headers)
+foreach(m tokens text unet vae pipeline)
+    add_test(NAME sdxl_${m} COMMAND sdxl_ref_test "${MAKO_SDXL}" "${MAKO_SDXL_REF}" ${m})
+    set_tests_properties(sdxl_${m} PROPERTIES LABELS image SKIP_RETURN_CODE 77)
+endforeach()
+add_test(NAME sdxl_lora COMMAND sdxl_ref_test "${MAKO_SDXL}" "${MAKO_SDXL_REF}" lora "${MAKO_SDXL_LORA}")
+set_tests_properties(sdxl_lora PROPERTIES LABELS image SKIP_RETURN_CODE 77)
 
 # The model in memory against a lender on loopback (a stand-in model; no GPU).
 add_executable(residency_test residency_test.cpp)

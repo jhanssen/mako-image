@@ -129,6 +129,16 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
             return fail(400, "guidance_scale must be a number from 0 to 30", "invalid_request_error");
         guidance = float(body["guidance_scale"].get_number());
     }
+    std::optional<image::Sampler> sampler = model.sampler;
+    if (body.contains("sampler") && !body["sampler"].is_null()) {
+        sampler = body["sampler"].is_string() ? image::parse_sampler(body["sampler"].get_string()) : std::nullopt;
+        if (!sampler)
+            return fail(400, "sampler must be euler or euler_a", "invalid_request_error");
+        if (sampler == image::Sampler::euler_ancestral && !image::Engine::predicts_noise(model.family))
+            return fail(400, std::format("sampler: euler_a needs a model that predicts the noise ({} does not)",
+                                         model.name),
+                        "invalid_request_error");
+    }
     uint32_t steps = model.steps;
     if (body.contains("steps") && !body["steps"].is_null()) {
         const auto& v = body["steps"];
@@ -182,6 +192,7 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
             r.terminal = model.terminal;
             r.negative = negative;
             r.guidance = guidance;
+            r.sampler = sampler;
             auto last = std::chrono::steady_clock::now();
             const auto t0 = last;
             r.progress = [&](uint32_t step, uint32_t steps) {
@@ -264,6 +275,8 @@ void ImageServer::Impl::image_model_list(httplib::Response& res)
             data += std::format(R"(,"steps":{})", m.steps);
         if (m.guidance)
             data += std::format(R"(,"guidance":{:g})", *m.guidance);
+        if (m.sampler)
+            data += std::format(R"(,"sampler":"{}")", *m.sampler == image::Sampler::euler ? "euler" : "euler_a");
         std::string l;
         for (const auto& [path, scale] : m.loras)
             l += std::format(R"({}{{"name":{},"scale":{:g}}})", l.empty() ? "" : ",",

@@ -1,13 +1,13 @@
-// Text to image with Qwen-Image 2.1, Krea 2, MOSS-Image or Anima from their original files.
+// Text to image with Qwen-Image 2.1, Krea 2, MOSS-Image, Anima or SDXL from their original files.
 //   mako_image <model dir> <prompt> [-o out.png] [--width N] [--height N] [--steps N] [--seed N] [--count N] [--rgb]
 //              [--lora FILE[:SCALE] ...] [--terminal F] [--text-encoder DIR] [--transformer PATH]
-//              [--negative TEXT] [--guidance F] [--llm URL] [--llm-api-key KEY]
+//              [--negative TEXT] [--guidance F] [--sampler NAME] [--llm URL] [--llm-api-key KEY]
 // --lora merges a LoRA into the weights (repeatable; SCALE its strength, default 1). --terminal: the schedule's last
 // noise level (0: not stretched there, as distilled few-step LoRAs are trained; default: the model's).
 // --text-encoder: another directory of the text encoder's weights (e.g. a refusal-ablated one; default: the model's).
 // --transformer: another file or directory of the transformer's weights (e.g. a checkpoint with LoRAs merged).
 // --negative: what the image should not be (classifier-free guidance: twice the transformer's work a step);
-// --guidance its scale (default: the model's).
+// --guidance its scale (default: the model's). --sampler: euler, or euler_a (models that predict the noise: SDXL).
 // --llm: a mako_serve on this machine whose memory to borrow while the model is loaded (it unloads its LLM meanwhile).
 #include "app/cli.hpp"
 #include "image/engine.hpp"
@@ -55,6 +55,7 @@ int main(int argc, char** argv)
     std::vector<std::pair<std::string, float>> loras;
     std::optional<float> terminal, guidance;
     std::optional<std::string> negative;
+    std::optional<mako::image::Sampler> sampler;
     std::string text_encoder, transformer;
     bool rgb = false;
     mako::app::Cli cli("mako_image", "<model dir> <prompt>", 2, 2);
@@ -74,6 +75,12 @@ int main(int argc, char** argv)
         .option("--guidance", "F",
                 "the guidance scale, with --negative or a model guided by default (default: the model's)",
                 [&](const std::string& v) { guidance = mako::app::Cli::parse<float>(v); })
+        .option("--sampler", "NAME", "euler or euler_a (SDXL) (default: the model's)",
+                [&](const std::string& v) {
+                    sampler = mako::image::parse_sampler(v);
+                    if (!sampler)
+                        throw std::invalid_argument("--sampler: euler or euler_a");
+                })
         .option("--terminal", "F", "the schedule's last noise level (0: none)",
                 [&](const std::string& v) { terminal = mako::app::Cli::parse<float>(v); })
         .option("--llm", "URL", "a mako_serve on this machine to borrow memory from", llm)
@@ -107,6 +114,7 @@ int main(int argc, char** argv)
             r.terminal = terminal;
             r.negative = negative;
             r.guidance = guidance;
+            r.sampler = sampler;
             auto t_step = Clock::now();
             r.progress = [&](uint32_t i, uint32_t total) {
                 mako::log::info("step {} of {}: {:.0f} ms, thermal {}", i, total, ms_since(t_step),

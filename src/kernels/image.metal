@@ -87,6 +87,27 @@ kernel void im2col3x3(device const float* x [[buffer(0)]], device half* out [[bu
     out[uint64_t(r) * a.kpad + col] = half(v);
 }
 
+// im2col3x3 for a stride-2 convolution (padding 1): output pixel p0 + r = (y, x) of an ow-wide image reads input
+// pixels (2y + ky - 1, 2x + kx - 1) of the h x w input. Grid (kpad, rows).
+struct Im2colS2Args {
+    uint h, w, c, p0, rows, kpad, ow;
+};
+kernel void im2col3x3_s2(device const float* x [[buffer(0)]], device half* out [[buffer(1)]],
+                         constant Im2colS2Args& a [[buffer(2)]], uint2 gid [[thread_position_in_grid]])
+{
+    const uint col = gid.x, r = gid.y;
+    if (col >= a.kpad || r >= a.rows)
+        return;
+    float v = 0.0f;
+    if (col < 9 * a.c) {
+        const uint ch = col / 9, kk = col % 9, p = a.p0 + r;
+        const int y = int(p / a.ow) * 2 + int(kk / 3) - 1, xx = int(p % a.ow) * 2 + int(kk % 3) - 1;
+        if (y >= 0 && y < int(a.h) && xx >= 0 && xx < int(a.w))
+            v = x[(uint64_t(y) * a.w + uint(xx)) * a.c + ch];
+    }
+    out[uint64_t(r) * a.kpad + col] = half(v);
+}
+
 // y[r][i] += b[i]. Grid (n, rows).
 kernel void bias_rows(device float* y [[buffer(0)]], device const float* b [[buffer(1)]], constant uint& n [[buffer(2)]],
                       uint2 gid [[thread_position_in_grid]])
@@ -180,11 +201,11 @@ struct LoraArgs {
     float scale;
 };
 
-// W[r][c] += scale * sum_j B[r][j] * A[j][c] over BF16 rows of W (from the adapted ones on), in float, rounded back.
-// Grid (k, rows).
-kernel void lora_merge(device bfloat* w [[buffer(0)]], device const float* a [[buffer(1)]],
-                       device const float* b [[buffer(2)]], constant LoraArgs& p [[buffer(3)]],
-                       uint2 gid [[thread_position_in_grid]])
+// W[r][c] += scale * sum_j B[r][j] * A[j][c] over BF16 (or F16) rows of W (from the adapted ones on), in float,
+// rounded back. Grid (k, rows).
+template <typename T>
+kernel void lora_merge(device T* w [[buffer(0)]], device const float* a [[buffer(1)]], device const float* b [[buffer(2)]],
+                       constant LoraArgs& p [[buffer(3)]], uint2 gid [[thread_position_in_grid]])
 {
     const uint c = gid.x, r = gid.y;
     if (c >= p.k || r >= p.rows)
@@ -192,9 +213,13 @@ kernel void lora_merge(device bfloat* w [[buffer(0)]], device const float* a [[b
     float d = 0.0f;
     for (uint j = 0; j < p.rank; ++j)
         d += b[uint64_t(r) * p.rank + j] * a[uint64_t(j) * p.k + c];
-    device bfloat* x = w + uint64_t(r) * p.k + c;
-    *x = bfloat(float(*x) + p.scale * d);
+    device T* x = w + uint64_t(r) * p.k + c;
+    *x = T(float(*x) + p.scale * d);
 }
+template [[host_name("lora_merge")]] kernel void lora_merge<bfloat>(device bfloat*, device const float*,
+                                                                    device const float*, constant LoraArgs&, uint2);
+template [[host_name("lora_merge_f16")]] kernel void lora_merge<half>(device half*, device const float*,
+                                                                      device const float*, constant LoraArgs&, uint2);
 
 // Krea 2's transformer: RMS norms with per-step scales and shifts, gated residuals and attention outputs, and the text
 // fusion's attention across each token's tapped layers.
@@ -508,11 +533,11 @@ struct GnArgs {
     uint silu;
 };
 
-// part[k][ch] = (sum, sum of squares) of channel ch over rows [k * chunk, (k + 1) * chunk). Threadgroups (chunks) of c.
+// part[k][ch] = (sum, sum of squares) of channel ch over rows [k * chunk, (k + 1) * chunk). Grid (c, chunks).
 kernel void gn_partial(device const float* x [[buffer(0)]], device float2* part [[buffer(1)]],
-                       constant GnArgs& a [[buffer(2)]], uint k [[threadgroup_position_in_grid]],
-                       uint ch [[thread_index_in_threadgroup]])
+                       constant GnArgs& a [[buffer(2)]], uint2 gid [[thread_position_in_grid]])
 {
+    const uint ch = gid.x, k = gid.y;
     if (ch >= a.c)
         return;
     const uint r1 = min(a.rows, (k + 1) * a.chunk);
@@ -655,4 +680,47 @@ kernel void gelu_erf(device float* x [[buffer(0)]], constant uint& n [[buffer(1)
 {
     if (i < n)
         x[i] = 0.5f * x[i] * (1.0f + erf_fit(x[i] * 0.70710678f));
+}
+
+// SDXL: CLIP's and the UNet's layer norms and activations.
+
+// y = layer_norm(x) * w + b over each row; one threadgroup per row.
+kernel void layer_norm(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]],
+                       device const float* b [[buffer(2)]], device float* y [[buffer(3)]],
+                       constant LnAffineArgs& a [[buffer(4)]], uint row [[threadgroup_position_in_grid]],
+                       uint tid [[thread_position_in_threadgroup]])
+{
+    threadgroup float scratch[TG / 32];
+    device const float* xr = x + uint64_t(row) * a.n;
+    device float* yr = y + uint64_t(row) * a.n;
+    float s = 0.0f;
+    for (uint i = tid; i < a.n; i += TG)
+        s += xr[i];
+    const float mean = tg_sum(s, scratch, tid) / float(a.n);
+    float v = 0.0f;
+    for (uint i = tid; i < a.n; i += TG) {
+        const float d = xr[i] - mean;
+        v += d * d;
+    }
+    const float inv = rsqrt(tg_sum(v, scratch, tid) / float(a.n) + a.eps);
+    for (uint i = tid; i < a.n; i += TG)
+        yr[i] = (xr[i] - mean) * inv * w[i] + b[i];
+}
+
+// x = x * sigmoid(1.702 x).
+kernel void quick_gelu(device float* x [[buffer(0)]], constant uint& n [[buffer(1)]], uint i [[thread_position_in_grid]])
+{
+    if (i < n)
+        x[i] = x[i] / (1.0f + exp(-1.702f * x[i]));
+}
+
+// m[t][i] = h * gelu(g) with h = hg[t][i], g = hg[t][n + i] (the exact GELU). Grid (n, rows).
+kernel void geglu_rows(device const float* hg [[buffer(0)]], device float* m [[buffer(1)]], constant uint& n [[buffer(2)]],
+                       uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= n)
+        return;
+    device const float* r = hg + uint64_t(gid.y) * 2 * n;
+    const float g = r[n + gid.x];
+    m[uint64_t(gid.y) * n + gid.x] = r[gid.x] * 0.5f * g * (1.0f + erf_fit(g * 0.70710678f));
 }

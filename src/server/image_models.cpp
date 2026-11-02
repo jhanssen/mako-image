@@ -86,6 +86,11 @@ ImageModel load_image_model(const std::string& dir, const std::string& name)
             m.terminal = float(*v);
         if (auto v = num("guidance"))
             m.guidance = float(*v);
+        if (auto v = str("sampler")) {
+            m.sampler = image::parse_sampler(*v);
+            if (!m.sampler)
+                throw std::runtime_error(cfg.string() + ": sampler must be euler or euler_a");
+        }
         if (j.contains("loras")) {
             if (!j["loras"].is_object())
                 throw std::runtime_error(cfg.string() + ": loras must be an object of name: scale");
@@ -109,6 +114,8 @@ ImageModel load_image_model(const std::string& dir, const std::string& name)
     m.family = image::Engine::family(m.dir);
     if (m.family.empty())
         throw std::runtime_error(std::format("{}: {} holds no image model mako knows", name, m.dir));
+    if (m.sampler == image::Sampler::euler_ancestral && !image::Engine::predicts_noise(m.family))
+        throw std::runtime_error(std::format("{}: euler_a needs a model that predicts the noise", name));
     return m;
 }
 

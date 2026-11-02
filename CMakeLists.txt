@@ -29,7 +29,8 @@ set(S ${CMAKE_CURRENT_SOURCE_DIR}/src)
 mako_add_kernels(image_kernels SOURCES ${S}/kernels/image.metal)
 
 add_library(mako_imagegen STATIC ${S}/image/engine.cpp ${S}/image/qwen_image.cpp ${S}/image/krea2.cpp
-            ${S}/image/moss_image.cpp ${S}/image/anima.cpp ${S}/image/png.cpp)
+            ${S}/image/moss_image.cpp ${S}/image/anima.cpp ${S}/image/sdxl.cpp ${S}/image/clip_tokenizer.cpp
+            ${S}/image/png.cpp)
 target_include_directories(mako_imagegen PUBLIC ${S})
 target_link_libraries(mako_imagegen PUBLIC mako_gpu mako_safetensors mako_text mako_log
                       PRIVATE glaze_headers "-framework ImageIO" "-framework CoreGraphics" "-framework CoreFoundation")
@@ -54,6 +55,9 @@ set(MAKO_MOSS_REF "$ENV{MAKO_MOSS_REF}" CACHE PATH "MOSS-Image reference tensors
 set(MAKO_ANIMA "$ENV{MAKO_ANIMA}" CACHE PATH "Anima directory (its split files) for its tests")
 set(MAKO_ANIMA_TRANSFORMER "$ENV{MAKO_ANIMA_TRANSFORMER}" CACHE FILEPATH "Anima transformer file for its tests")
 set(MAKO_ANIMA_REF "$ENV{MAKO_ANIMA_REF}" CACHE PATH "Anima reference tensors for its tests")
+set(MAKO_SDXL "$ENV{MAKO_SDXL}" CACHE PATH "SDXL directory (its checkpoint and tokenizer/) for its tests")
+set(MAKO_SDXL_REF "$ENV{MAKO_SDXL_REF}" CACHE PATH "SDXL reference tensors for its tests")
+set(MAKO_SDXL_LORA "$ENV{MAKO_SDXL_LORA}" CACHE FILEPATH "SDXL LoRA (Kohya's format) its reference's lora_manifest.json names")
 set(MAKO_T5_TOKENIZER "$ENV{MAKO_T5_TOKENIZER}" CACHE FILEPATH "T5 tokenizer.json for the unigram tokenizer test")
 enable_testing()
 add_subdirectory(tests)

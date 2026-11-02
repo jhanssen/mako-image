@@ -4,10 +4,10 @@ They run from their original files (BF16 safetensors and configs), not a GGUF: t
 transformer, as F16 (BF16 values below ~6.1e-5 lose bits there) or quantized. They share `image::Engine`: the text
 encoder (Qwen3-VL, or Qwen3.5's hybrid), the VAE decoder (Qwen-Image's or FLUX.2's), the flow-matching Euler schedule,
 the denoising loop with guidance, and LoRA merging. `Engine::open` picks the model from `model_index.json`, or takes
-Anima's single-file layout (`diffusion_models/`, `text_encoders/`, `vae/`). The text encoders' BF16 GEMMs also
-multiply what rounding their activations to bfloat left out (a second GEMM): the first token's outlier channels grow
-to thousands and cancel in the last layers, and with activations in bfloat alone its final state came out a few
-percent off.
+Anima's single-file layout (`diffusion_models/`, `text_encoders/`, `vae/`) or an SDXL checkpoint (one file). The text
+encoders' BF16 GEMMs also multiply what rounding their activations to bfloat left out (a second GEMM): the first token's
+outlier channels grow to thousands and cancel in the last layers, and with activations in bfloat alone its final state
+came out a few percent off.
 
 ### Qwen-Image 2.1
 
@@ -65,3 +65,25 @@ percent off.
 - Schedule: shift 3 over 1000 levels, steps evenly spaced from the top; Euler. Turbo (the file name says so): 10
   steps, no guidance; the others 30 at guidance 4 against the model card's negative prompt without its score tags.
 
+### SDXL
+
+- One checkpoint file (F16) in the original names; Engine's text encoder is not used, its VAE decoder is (the
+  AutoencoderKL layout, mapped from the original names: 4 channels, 8x, a token its 2x2 patch, latents scaled by
+  0.13025).
+- Text: CLIP ViT-L (12 layers, 768, quick GELU) and OpenCLIP bigG (32 layers, 1280, GELU), causal, heads of 64, each
+  chunk of 77 tokens on its own; the second to last layer's states of both side by side (2048 per token, chunks one
+  after another), and bigG's final state at the first end token, layer normed and projected (1280). Prompt weights
+  as ComfyUI applies them: a weighted token's states move away from the empty prompt's by its weight; a weighted
+  part shorter than 8 tokens is not split across chunks. Tokenizer: CLIP's BPE (NFC, whitespace runs as one space,
+  lowercase, word ends marked), `image::ClipTokenizer`.
+- UNet (2.6B): input blocks at 320, 640, 1280 channels (two residual blocks each, the last two levels with
+  transformers of 2 and 10 blocks, stride-2 convolutions between), a middle block (10), output blocks with the input
+  blocks' outputs concatenated and nearest 2x upsampling; residual blocks add the timestep embedding's projection
+  (all blocks' in one GEMM a step) after their first convolution; transformers: group norm, linear in, self- and
+  cross-attention (the text's keys and values cached per block at begin()), GEGLU FFN, linear out. Added
+  conditioning: the pooled state and the size (height, width, crop 0, 0, target height, width) as 256 sinusoid values
+  each. F16 weights on the GEMM, which also runs the embeddings' single rows (there is no F16 GEMV).
+- Schedule: 1000 levels from betas linear in their square root (0.00085 to 0.012); the "normal" schedule (levels
+  evenly spaced in timestep, interpolated in log sigma), the UNet's timestep the nearest level; inputs scaled by
+  1 / sqrt(sigma^2 + 1), the start noise by sqrt(1 + sigma_max^2). Euler, or Euler ancestral (the default): down to
+  sqrt(next^2 - up^2), then fresh noise times up = next sqrt(1 - next^2 / sigma^2).

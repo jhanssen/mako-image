@@ -89,8 +89,9 @@ std::vector<uint8_t> with_provenance(std::vector<uint8_t> png, const Provenance&
     std::string params = p.prompt;
     if (p.negative)
         params += "\nNegative prompt: " + *p.negative;
-    params += std::format("\nSteps: {}, Sampler: Euler, CFG scale: {:g}, Seed: {}, Size: {}x{}, Model: {}", p.steps,
-                          p.guidance, p.seed, p.width, p.height, p.model);
+    params += std::format("\nSteps: {}, Sampler: {}, CFG scale: {:g}, Seed: {}, Size: {}x{}, Model: {}", p.steps,
+                          p.sampler == "euler_a" ? "Euler a" : "Euler", p.guidance, p.seed, p.width, p.height,
+                          p.model);
     std::string loras;
     for (const auto& [name, scale] : p.loras)
         loras += std::format("{}{{\"name\":{},\"scale\":{:g}}}", loras.empty() ? "" : ",", json_string(name), scale);
@@ -100,10 +101,10 @@ std::vector<uint8_t> with_provenance(std::vector<uint8_t> png, const Provenance&
             params += std::format("{}{}:{:g}", i ? " " : "", p.loras[i].first, p.loras[i].second);
     }
     const std::string json = std::format(
-        "{{\"prompt\":{},\"negative_prompt\":{},\"model\":{},\"steps\":{},\"guidance\":{:g},\"sampler\":\"euler\","
+        "{{\"prompt\":{},\"negative_prompt\":{},\"model\":{},\"steps\":{},\"guidance\":{:g},\"sampler\":{},"
         "\"seed\":{},\"width\":{},\"height\":{},\"loras\":[{}]}}",
         json_string(p.prompt), p.negative ? json_string(*p.negative) : "null", json_string(p.model), p.steps,
-        p.guidance, p.seed, p.width, p.height, loras);
+        p.guidance, json_string(p.sampler), p.seed, p.width, p.height, loras);
     std::vector<uint8_t> chunks = itxt("parameters", params);
     const auto m = itxt("mako", json);
     chunks.insert(chunks.end(), m.begin(), m.end());

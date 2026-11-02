@@ -195,13 +195,15 @@ uses unless told otherwise, at the scale shown.
 - `--negative "TEXT"`: what the image should not show, as a short list ("blurry, extra fingers, text, watermark"),
   when the user wants something kept out or a render keeps showing something unwanted. It adds a second transformer
   pass a step, so the render takes about twice as long. Qwen-Image follows it well; Krea 2 Turbo barely (it was
-  trained to run without one). MOSS-Image always runs that pass (against an empty negative prompt without one) and
-  Anima (not Turbo) against a default one, so there it costs no extra time. A model at guidance 1 (the models list
-  shows it; speed-LoRA setups) skips the pass, and a negative prompt has no effect.
-- `--guidance F`: how strongly the prompt, against the negative prompt, steers the image (0 to 30; default the
-  model's: Qwen-Image 4, Krea 2 Turbo 2, MOSS-Image 3, Anima 4). Too high gives flat, oversaturated or broken images
-  (Krea 2 Turbo from 3). Change it only when the user asks, or by 1 at a time when a negative prompt shows too little
-  or too much.
+  trained to run without one). MOSS-Image always runs that pass (against an empty negative prompt without one), and
+  Anima (not Turbo) and SDXL against a default one, so there it costs no extra time. A model at guidance 1 (the
+  models list shows it; speed-LoRA setups) skips the pass, and a negative prompt has no effect.
+- `--guidance F`: how strongly the prompt, against the negative prompt, steers the image (0 to 30; default the model's:
+  Qwen-Image 4, Krea 2 Turbo 2, MOSS-Image 3, Anima 4, SDXL 6). Too high gives flat, oversaturated or broken images
+  (Krea 2 Turbo from 3). Change it only when the user asks, or by 1 at a time when a negative prompt shows too little or
+  too much.
+- `--sampler euler|euler_a`: SDXL models only (default Euler a, which adds fresh noise each step, so a seed's
+  image changes with the step count). Leave it out unless the user asks.
 - `--layout DRAFT`: a MOSS-Image layout in place of size and prompt (see "Layouts").
 
 The environment, set by the user: `MAKO_IMAGE_URL` and `MAKO_IMAGE_API_KEY` (the server), `MAKO_IMAGE_DIR` (where

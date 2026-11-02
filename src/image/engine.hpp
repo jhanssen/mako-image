@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mako::image {
@@ -22,6 +23,12 @@ struct Options {
     gpu::Telemetry telemetry = gpu::Telemetry::off;
 };
 
+// How a step moves the latents: Euler, or Euler ancestral (towards a lower noise level, then fresh noise up to the
+// next; models that predict the noise only).
+enum class Sampler { euler, euler_ancestral };
+// "euler" or "euler_a" (also "euler_ancestral"); nullopt for another name.
+std::optional<Sampler> parse_sampler(std::string_view name);
+
 // An image model from its original files (a directory with model_index.json, text_encoder/, transformer/, vae/,
 // scheduler/): the parts the models share, the Qwen3-VL text encoder, the VAE decoder, the flow-matching schedule and
 // the denoising loop. QwenImage and Krea2 add their diffusion transformers; open() picks one from model_index.json.
@@ -31,6 +38,8 @@ public:
     static std::unique_ptr<Engine> open(const std::string& dir, mtl::Context& ctx, const Options& opts = {});
     // Which model open() would load from `dir` ("" if none it knows), without loading it.
     static std::string family(const std::string& dir);
+    // Whether a family's models predict the noise (predicts_noise()).
+    static bool predicts_noise(const std::string& family) { return family == "SDXL"; }
 
     virtual ~Engine() = default;
 
@@ -47,6 +56,10 @@ public:
     virtual float default_guidance() const = 0;
     // The negative prompt of requests that give none (unset: no guidance then).
     virtual std::optional<std::string> default_negative() const { return std::nullopt; }
+    virtual Sampler default_sampler() const { return Sampler::euler; }
+    // step() predicts the noise (the latents are image + sigma * noise, the start noise scaled to the first level)
+    // rather than a flow's velocity (latents (1 - sigma) * image + sigma * noise).
+    virtual bool predicts_noise() const { return false; }
 
     struct Request {
         std::string prompt;
@@ -59,6 +72,7 @@ public:
         // the model's own); none at scale 1.
         std::optional<std::string> negative;
         std::optional<float> guidance; // its scale (unset: the model's)
+        std::optional<Sampler> sampler; // unset: the model's
         std::function<void(uint32_t step, uint32_t steps)> progress;
     };
     // Text to image: RGBA [height][width][4] in [-1, 1].
@@ -70,8 +84,8 @@ public:
     // The transformer's text input for a prompt.
     virtual std::vector<float> prompt_embeddings(const std::string& prompt) = 0;
     // A generation's text and latent grid (h x w tokens of latent_width()), then step() for each denoising step: the
-    // velocity the transformer predicts for latents [h * w][latent_width()] at noise level sigma. Slots keep separate texts (1: the negative
-    // prompt's) over the same grid.
+    // velocity the transformer predicts for latents [h * w][latent_width()] at noise level sigma (or the noise, with
+    // predicts_noise()). Slots keep separate texts (1: the negative prompt's) over the same grid.
     virtual void begin(std::span<const float> prompt, uint32_t h, uint32_t w, uint32_t slot = 0) = 0;
     virtual std::vector<float> step(std::span<const float> latents, float sigma, uint32_t slot = 0) = 0;
 
@@ -104,7 +118,27 @@ protected:
     // dir's text encoder (or opts.text_encoder), VAE, scheduler and tokenizer (processor/ or tokenizer/).
     Engine(const std::string& dir, mtl::Context& ctx, const Options& opts);
     Engine(const Parts& parts, mtl::Context& ctx, const Options& opts);
+    // Neither text encoder nor VAE: the model loads its own (load_vae_ldm for the VAE).
+    Engine(mtl::Context& ctx, const Options& opts);
     static Parts diffusers_parts(const std::string& dir, const Options& opts);
+    // The VAE (4 latent channels, 8x) under `prefix` in a single-file checkpoint, in the original layout's names;
+    // a token packs a 2x2 patch, the latents scaled by `scale`.
+    void load_vae_ldm(const std::string& file, const std::string& prefix, float scale);
+
+    // Convolutions as GEMMs over channels-last images: weights F16 [cout][kpad] (cin * k * k columns, a 3x3's zero
+    // padded to a multiple of 64). A causal 3D convolution's weights are its last time tap's (a single frame).
+    struct Conv {
+        Tensor w, b;
+        uint32_t cin = 0, cout = 0, k = 3, kpad = 0, stride = 1;
+    };
+    // `name`.weight and .bias (F32, F16 or BF16): a convolution (or a linear layer, as a 1x1), or several of one
+    // input's with their outputs side by side.
+    Conv load_conv(const safetensors::Files& files, std::span<const std::string> names, uint32_t k);
+    // y = conv(x) over an h x w image (with stride 2, a 3x3 to h / 2 x w / 2).
+    void conv(MTL::ComputeCommandEncoder*& enc, const Conv& c, MTL::Buffer* x, uint32_t h, uint32_t w, MTL::Buffer* y);
+    // Group norm (32 groups) times g plus b over channels-last images, then SiLU when silu is set.
+    void group_norm(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, const Tensor& g, const Tensor& b, MTL::Buffer* y,
+                    uint32_t rows, uint32_t c, bool silu, float eps = 1e-6f);
 
     // The weight a LoRA module adapts: its matrix and the rows it has there (fused matrices share one).
     struct LoraTarget {
@@ -117,9 +151,14 @@ protected:
     virtual Tensor* lora_bias(const std::string&) { return nullptr; }
     // A small matrix of `module` the model keeps on the CPU, [rows][cols] floats (null: none).
     virtual float* lora_cpu(const std::string&, uint32_t& /*rows*/, uint32_t& /*cols*/) { return nullptr; }
+    // After a LoRA is merged (what the model computed from the weights before is stale).
+    virtual void lora_merged() {}
 
     Tensor upload(const safetensors::Files& files, const std::string& name, bool matrix);
-    // BF16 (or F32, rounded to BF16) matrices of one width, their rows one after another in one tensor.
+    // A tensor's values as F32 (from F32, F16 or BF16).
+    Tensor upload_f32(const safetensors::Files& files, const std::string& name);
+    // BF16 (or F32, rounded to BF16) matrices of one width, their rows one after another in one tensor; F16 ones stay
+    // F16.
     Tensor upload_rows(const safetensors::Files& files, std::span<const std::string> names);
     // An RMS norm's scale stored zero-centred: weight + 1, as floats.
     Tensor upload_plus_one(const safetensors::Files& files, const std::string& name);
@@ -171,12 +210,6 @@ private:
     // Rows of the token embedding table (BF16, read from the file).
     void embed(std::span<const int32_t> ids, float* out) const;
 
-    // The VAE's convolutions as GEMMs over channels-last images: weights F16 [cout][kpad] (cin * k * k columns, a 3x3's
-    // zero padded to a multiple of 64). A causal 3D convolution's weights are its last time tap's (a single frame).
-    struct Conv {
-        Tensor w, b;
-        uint32_t cin = 0, cout = 0, k = 3, kpad = 0;
-    };
     struct Res {
         Tensor g1, g2; // the norms' scales (and with group norms, b1, b2 their biases)
         Tensor b1, b2;
@@ -190,21 +223,18 @@ private:
         uint32_t cin = 0, cout = 0, ft = 1;
     };
     void load_vae();
-    void load_vae_flux2();
+    // The AutoencoderKL layout (FLUX.2's and SDXL's): group norms, separate q, k, v, upsamplers' plain convolutions.
+    void load_vae_kl();
     // A VAE tensor's name in the file (the Diffusers layout's, or the original one's).
     std::string vk(const std::string& name) const;
-    // A convolution (or a linear layer, as a 1x1), or several of one input's with their outputs side by side.
+    // A VAE convolution by its Diffusers name.
     Conv load_conv(const std::string& name, uint32_t k);
     Conv load_conv(std::span<const std::string> names, uint32_t k);
-    void conv(MTL::ComputeCommandEncoder*& enc, const Conv& c, MTL::Buffer* x, uint32_t h, uint32_t w, MTL::Buffer* y);
     // y = conv2(silu(norm2(conv1(silu(norm1(x)))))) + shortcut(x); t1, t2 scratch.
     void res_block(MTL::ComputeCommandEncoder*& enc, const Res& r, MTL::Buffer* x, uint32_t h, uint32_t w,
                    MTL::Buffer* y, MTL::Buffer* t1, MTL::Buffer* t2);
     void norm_silu(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, const Tensor& g, MTL::Buffer* y, uint32_t rows,
                    uint32_t c, const Tensor* b = nullptr);
-    // Group norm (32 groups) times g plus b over channels-last images, then SiLU when silu is set.
-    void group_norm(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, const Tensor& g, const Tensor& b, MTL::Buffer* y,
-                    uint32_t rows, uint32_t c, bool silu);
 
     safetensors::Files text_files_, vae_files_;
     safetensors::Files::Ref embd_;
@@ -227,9 +257,15 @@ private:
     // up blocks have the duplicating shortcut (Qwen-Image 2.1's).
     uint32_t z_ = kLatent, patch_ = 1;
     bool residual_ = false;
-    bool flux2_ = false; // the FLUX.2 VAE: group norms, separate q, k, v, upsamplers' plain convolutions
-    bool wan_ = false;   // the first Qwen-Image VAE in its original names
+    bool kl_ = false;  // the AutoencoderKL layout (load_vae_kl)
+    bool wan_ = false; // the first Qwen-Image VAE in its original names
+    std::string ldm_;  // the prefix of a VAE in the original AutoencoderKL names (SDXL checkpoints)
+    unsigned ldm_levels_ = 0;
 };
+
+// A prompt's parts and their weights: "(text)" times 1.1, "(text:w)" w, nested ones multiplied, "\(" and "\)"
+// literal parentheses.
+std::vector<std::pair<std::string, float>> prompt_weights(const std::string& prompt);
 
 // LoRA files and their scales, merged in order.
 using Loras = std::vector<std::pair<std::string, float>>;
