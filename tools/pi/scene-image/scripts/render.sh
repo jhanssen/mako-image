@@ -1,7 +1,7 @@
 #!/bin/sh
 # Renders an image with mako_image_serve's /v1/images/generations and saves it as a PNG.
 #   render.sh [--model NAME] [--lora NAME[:SCALE][:merge|:unmerged]]... [--no-loras] [--steps N] [--negative TEXT]
-#             [--guidance F] [--sampler NAME] [--skip-blocks LIST] WIDTHxHEIGHT "prompt"
+#             [--guidance F] [--sampler NAME] [--skip-blocks LIST] [--seed N] WIDTHxHEIGHT "prompt"
 #   render.sh [options] --layout DRAFT     (MOSS-Image: a layout draft, see layout.py, as a file, - for standard input or
 #                                           the JSON itself; the size comes from the draft)
 # --model renders with that image model (default: the server's); --lora (repeatable) with these LoRAs in place of the
@@ -9,14 +9,15 @@
 # --steps N denoising steps (0: the model's own count; default: the model's setting); --negative what the image should
 # not show (a second transformer pass a step); --guidance its scale (default: the model's); --sampler euler, euler_a
 # (SDXL models only) or er_sde (default: the model's); --skip-blocks the blocks the negative prompt's pass leaves out,
-# e.g. 22,24 ("" for none; MOSS-Image only; default: the model's).
+# e.g. 22,24 ("" for none; MOSS-Image only; default: the model's); --seed N the noise's seed (default: a new one each
+# render; the PNG records it).
 # MAKO_IMAGE_URL (mako_image_serve; default http://127.0.0.1:8082/v1), MAKO_IMAGE_API_KEY (when the server wants
 # one), MAKO_IMAGE_DIR (default ~/Pictures/mako), MAKO_IMAGE_OPEN=0 (not opened in the image viewer). Prints the saved
 # file's path.
 set -eu
 usage() {
     echo "usage: render.sh [--model NAME] [--lora NAME[:SCALE][:merge|:unmerged]]... [--no-loras] [--steps N]" >&2
-    echo "                 [--negative TEXT] [--guidance F] [--sampler NAME] [--skip-blocks LIST]" >&2
+    echo "                 [--negative TEXT] [--guidance F] [--sampler NAME] [--skip-blocks LIST] [--seed N]" >&2
     echo "                 WIDTHxHEIGHT \"prompt\"" >&2
     echo "       render.sh [options] --layout DRAFT.json|-|'{...}'" >&2
     exit 2
@@ -28,6 +29,7 @@ guidance=
 sampler=
 skip=
 skip_set=
+seed=
 model=
 layout=
 while [ $# -gt 0 ]; do
@@ -74,6 +76,11 @@ while [ $# -gt 0 ]; do
         skip_set=1
         shift 2
         ;;
+    --seed)
+        [ $# -ge 2 ] || usage
+        seed=$2
+        shift 2
+        ;;
     --no-loras)
         loras="
 "
@@ -100,7 +107,7 @@ base="$dir/$(date +%Y%m%d-%H%M%S)"
 tmp=$(mktemp)
 trap 'rm -f "$tmp"' EXIT
 body=$(SIZE=$size PROMPT=$prompt LORAS=$loras STEPS=$steps MODEL=$model NEGATIVE=$negative GUIDANCE=$guidance \
-    SAMPLER=$sampler SKIP=$skip SKIP_SET=$skip_set python3 -c '
+    SAMPLER=$sampler SKIP=$skip SKIP_SET=$skip_set SEED=$seed python3 -c '
 import json, os, sys
 b = {"prompt": os.environ["PROMPT"], "size": os.environ["SIZE"], "n": 1, "response_format": "b64_json"}
 if os.environ["MODEL"]:
@@ -124,6 +131,10 @@ if os.environ["SKIP_SET"]:
         b["skip_blocks"] = [int(x) for x in os.environ["SKIP"].split(",") if x.strip()]
     except ValueError:
         sys.exit("--skip-blocks takes block numbers, e.g. 22,24")
+if os.environ["SEED"]:
+    if not os.environ["SEED"].isdigit():
+        sys.exit("--seed takes a whole number")
+    b["seed"] = os.environ["SEED"]
 if os.environ["LORAS"]:
     b["loras"] = []
     for spec in filter(None, os.environ["LORAS"].split("\n")):

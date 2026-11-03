@@ -86,13 +86,14 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   prompt, steps, CFG scale, seed, size, model and LoRAs as image tools commonly read them, and `mako`, the same as
   JSON). `quality`, `style`, `background`, `moderation` and `user` are accepted and left
   alone: the model's steps (Qwen-Image 2.1 40, Krea 2 Turbo 8, MOSS-Image 50, Anima Turbo 10, Anima 30, SDXL 28), a
-  random seed for each image (in the log).
+  random seed for each image (in the log) unless `seed` gives one.
 - Extensions: `steps` (0 to 100; 0: the model's own), `negative_prompt` (what the image should not be) and
   `guidance_scale` (its strength; default the model directory's, else the model's: Qwen-Image 2.1 4, Krea 2 Turbo 2,
   MOSS-Image 3, Anima 4, SDXL 6), `sampler` (`euler`; `euler_a`, Euler ancestral, for SDXL only; `er_sde`, the
   three-stage extended reverse-time SDE solver, which adds noise each step; default the model directory's, else the
   model's: Euler, SDXL Euler a), `skip_blocks` (MOSS-Image: the blocks the negative prompt's pass leaves out, e.g. `[22,
-  24]`; default `[22]`, as its reference) and `loras` (below). A negative prompt runs the transformer twice a step, so
+  24]`; default `[22]`, as its reference), `seed` (a whole number, as a string past 2^53, as the PNG records it; the
+  images of one request take seed, seed + 1, ...; the same seed and settings give the same image) and `loras` (below). A negative prompt runs the transformer twice a step, so
   the image takes about twice as long; without one, nothing changes. Qwen-Image follows it well (scales 2 to 6 tried).
   Krea 2 Turbo was distilled to run without it: at 1.5-2 the negative prompt shows a little, at 3 the image turns flat
   and oversaturated, at 5.5 it breaks. MOSS-Image is always guided, as its reference runs it: against an empty negative
@@ -156,7 +157,7 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   (`scripts/tags.py`; the list as a1111-sd-webui-tagcomplete ships it, `name,category,posts,"aliases"`, at
   `~/models/tags/danbooru.csv` or `MAKO_TAGS_CSV`). Its script saves to `~/Pictures/mako` (`MAKO_IMAGE_DIR`) and opens
   the image; `MAKO_IMAGE_URL` (default `http://127.0.0.1:8082/v1`) and `MAKO_IMAGE_API_KEY` point it at the server.
-- Not yet: condition images (edits, references; `/v1/images/edits`), image to image, and a per-request seed.
+- Not yet: condition images (edits, references; `/v1/images/edits`) and image to image.
 
 
 ## Tests

@@ -240,6 +240,8 @@ uses unless told otherwise, at the scale shown.
 - `--skip-blocks LIST`: MOSS-Image only, the blocks its negative prompt's pass leaves out, e.g. `22,24` (22, 24
   and 26 are the ones its makers suggest; `""` for none, which looks more photographic but can lose detail; default
   the model's, 22). Leave it out unless the user asks.
+- `--seed N`: the noise's seed; the same seed and settings give the same image. Without it each render gets a new
+  one (the PNG records it). Use it to compare one change at a time, or when the user wants a render repeated.
 - `--layout DRAFT`: a MOSS-Image layout in place of size and prompt (see "Layouts").
 
 The environment, set by the user: `MAKO_IMAGE_URL` and `MAKO_IMAGE_API_KEY` (the server), `MAKO_IMAGE_DIR` (where

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -173,6 +174,19 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
             if (l.merge == false && !image::Engine::keeps_loras_unmerged(model.family))
                 return fail(400, std::format("loras: {} keeps no LoRA unmerged", model.name), "invalid_request_error");
     }
+    // A 64-bit seed (as images record it) is past a JSON number's exact range, so it may come as a string.
+    std::optional<uint64_t> seed;
+    if (body.contains("seed") && !body["seed"].is_null()) {
+        const auto& v = body["seed"];
+        uint64_t x = 0;
+        if (v.is_number() && v.get_number() >= 0 && v.get_number() <= 9007199254740992.0 &&
+            v.get_number() == std::floor(v.get_number()))
+            x = uint64_t(v.get_number());
+        else if (const std::string t = v.is_string() ? v.get_string() : std::string();
+                 t.empty() || std::from_chars(t.data(), t.data() + t.size(), x).ptr != t.data() + t.size())
+            return fail(400, "seed must be a whole number from 0 (a string past 2^53)", "invalid_request_error");
+        seed = x;
+    }
     bool jpeg = false;
     if (body.contains("output_format") && body["output_format"].is_string()) {
         const std::string f = body["output_format"].get_string();
@@ -205,7 +219,7 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
             r.prompt = prompt;
             r.width = width;
             r.height = height;
-            r.seed = (uint64_t(rd()) << 32) | rd();
+            r.seed = seed ? *seed + i : (uint64_t(rd()) << 32) | rd();
             r.steps = steps;
             r.terminal = model.terminal;
             r.negative = negative;
