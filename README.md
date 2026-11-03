@@ -151,10 +151,8 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
 - `tools/pi/scene-image` is a pi skill that turns the conversation into an image prompt and renders it through this
   endpoint (`ln -s "$PWD/tools/pi/scene-image" ~/.pi/agent/skills/`; then ask for an image of the scene, or
   `/skill:scene-image`). It lists the models and picks one by their descriptions, lists the chosen model's LoRAs and
-  passes them when the user wants them. For MOSS-Image it can lay subjects out in boxes, or describe a room in metres
-  (people by posture, position and facing, objects, a camera) and let `scripts/scene.py` turn it into layouts from
-  several camera angles. For tag-based models it looks tags up in Danbooru's tag list and checks the prompt's
-  (`scripts/tags.py`; the list as a1111-sd-webui-tagcomplete ships it, `name,category,posts,"aliases"`, at
+  passes them when the user wants them. For MOSS-Image it can lay subjects out in boxes. For tag-based models it looks
+  tags up in Danbooru's tag list and checks the prompt's (`scripts/tags.py`; the list as a1111-sd-webui-tagcomplete ships it, `name,category,posts,"aliases"`, at
   `~/models/tags/danbooru.csv` or `MAKO_TAGS_CSV`). Its script saves to `~/Pictures/mako` (`MAKO_IMAGE_DIR`) and opens
   the image; `MAKO_IMAGE_URL` (default `http://127.0.0.1:8082/v1`) and `MAKO_IMAGE_API_KEY` point it at the server.
 - Not yet: condition images (edits, references; `/v1/images/edits`) and image to image.

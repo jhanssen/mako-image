@@ -145,30 +145,8 @@ DRAFT being a file, `-` to read it from standard input (e.g. a heredoc), or the 
 - Optional: `summary.meta`, a list of medium or genre words (`["poster"]`, `["product photography"]`);
   `summary.canvas`, `single` (default), `multi_panel` or `collage`; `palette` (in summary or an item), a list of
   colours. The layout is the whole prompt: put any prose in `summary.caption`.
-
-## Scenes
-
-When where several people are and how they are turned to each other matters, or to try the same arrangement from
-several camera angles, describe the room instead of the boxes: `scripts/scene.py SPEC [--n N] [--seed S]` places
-people (by posture, position and facing, in metres) and objects on a floor, puts a camera there, and prints one layout
-draft per line for `render.sh --layout` (MOSS-Image only). Camera ranges or several presets give each draft its own
-camera. The spec's format is in scene.py's header; `examples/` has five.
-
-```sh
-scripts/scene.py spec.json --n 3 --seed 1 | head -n 1 | scripts/render.sh --model MODEL --layout -
-```
-
-- Each draft writes what depends on its camera: where each body is in the frame, how it is turned to the camera,
-  which body is in front of which, which object hides part of a person, where the frame cuts it. Captions are copied
-  into every draft unchanged, so they never mention the camera or the frame ("facing the camera", "on the left");
-  they place a person relative to others and to objects ("his back to the window", "her hand on the man's
-  shoulder"), and otherwise describe only that person (see "Layouts").
-- A posture fixes a body's box and little else: the caption says the rest (lying on the back, front or side; arms,
-  legs, hands). A pose no posture covers (legs hanging over a ledge, bent at the waist) gets its own `box` and `base`
-  around the whole body, or the image model fills the posture's box.
-- A layout has positions in the frame, not depth. "Between", "behind" and "across" show only when the camera looks
-  across them, so that they run left to right in the image; from other angles, leave them to the captions.
-- Objects behind the camera are left out of that draft; a person behind it is an error (move the camera back).
+- A layout has positions in the frame, not depth: which subject is in front, or hides part of another, goes in the
+  captions ("partly behind the fern"); the order of the items did not change it when tried.
 
 ## Models
 

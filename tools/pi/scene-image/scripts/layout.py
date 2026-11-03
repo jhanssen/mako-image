@@ -14,7 +14,7 @@ import json, math, sys
 
 ITEM_KEYS = {"label", "caption", "bbox", "text", "tags", "palette"}
 SUMMARY_KEYS = {"caption", "meta", "canvas", "palette"}
-ROOT_KEYS = {"width", "height", "summary", "items", "bbox_coord_space", "bbox_format", "camera"}  # camera: scene.py's, not sent
+ROOT_KEYS = {"width", "height", "summary", "items", "bbox_coord_space", "bbox_format"}
 
 
 def fail(msg):
