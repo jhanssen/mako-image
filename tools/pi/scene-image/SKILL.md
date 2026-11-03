@@ -24,7 +24,8 @@ Turn what the conversation has established into one image prompt, render it with
 4. The script opens the image in the Mac's image viewer. Reply with its path and the prompt used, in a line or two.
    Do not `read` the image unless the user wants to talk about what is in it (it then goes to the model as image
    input, which needs the chat model's mako_serve started with `--mmproj`). If the user wants changes, revise the
-   prompt as "Revising" says and render again.
+   prompt as "Revising" says and render again. What the user says about a render describes that render (often a
+   fault to fix), not words to add to the prompt; see "Revising".
 
 ## Writing the prompt
 
@@ -100,6 +101,20 @@ The list is `~/models/tags/danbooru.csv` (`MAKO_TAGS_CSV`); if the script says t
 you can and tell the user the check did not run.
 
 ## Revising
+
+After a render, read what the user says about it as a report on that image first:
+
+- A plain statement about the picture ("the man is facing left", "she has three hands", "the sign says OPEN") is
+  what the user sees in it, usually a fault. It is not text for the prompt: work out what the image should show
+  instead (from the prompt and the conversation) and change the prompt toward that. Never paste the user's
+  statement into the prompt.
+- It is a request only when it is worded as one: "make", "change to", "should", "I want", "instead", "can you".
+- When you cannot tell whether a statement says what the image shows or what the user wants, ask in one short
+  line ("Is that what the render shows and you want it fixed, or how it should be?") and do not render until they
+  answer.
+- Example. Prompt: "...the man faces the woman...". User: "the man is facing left". The render has him turned away
+  from her (she stands on the right): make his facing unmistakable ("the man, seen in profile, faces right, toward
+  the woman"). Wrong: adding "the man is facing left".
 
 When the user wants a change or a render came out wrong:
 
