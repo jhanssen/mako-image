@@ -59,6 +59,8 @@ Rules:
   references, not weight.
 - Say what is there, not what is not: "not sitting up" or "no hat" tends to put the thing in the image. What must
   stay out goes in `--negative` (see "Options"). No text or lettering unless the user wants it.
+- Text to render: the exact words in quotes, in their own language and case. Where the lines must break, put line
+  breaks in the quoted text (MOSS-Image follows them; otherwise it breaks lines itself).
 - Only what this camera sees: from behind a person, their face and the hands in front of them are hidden; "in
   profile" and "from behind" exclude each other. Describe what shows instead (hands where they are visible, the back
   of the head).
@@ -135,8 +137,14 @@ DRAFT being a file, `-` to read it from standard input (e.g. a heredoc), or the 
 - A box's caption is drawn inside the box, so it describes only that subject, as a block of "Writing the prompt"
   does; describing another subject's body there draws it twice. `summary.caption` gives the medium, the arrangement
   in brief and the setting.
-- Labels: `character` for people and creatures, `object` for things, `text` (with `"text": "<the exact words>"`)
-  for lettering.
+- Labels: `character` for people and creatures, `object` for things, `text` (with `"text": "<the exact words>"`,
+  `\n` where a line must break) for lettering. A text item's caption gives the lettering's look (size, weight,
+  colour, the surface it is on); give separate items to text placed apart.
+- Text must fit its box at the image's size: a long line or a paragraph needs a much wider box than a short title.
+  Enlarge or rearrange the boxes rather than shortening the user's wording.
+- Optional: `summary.meta`, a list of medium or genre words (`["poster"]`, `["product photography"]`);
+  `summary.canvas`, `single` (default), `multi_panel` or `collage`; `palette` (in summary or an item), a list of
+  colours. The layout is the whole prompt: put any prose in `summary.caption`.
 
 ## Scenes
 
@@ -229,8 +237,9 @@ uses unless told otherwise, at the scale shown.
 - `--sampler euler|euler_a|er_sde`: euler_a for SDXL models only (their default; it adds fresh noise each step, so a
   seed's image changes with the step count); er_sde for any model (also adds noise each step). Leave it out unless the
   user asks.
-- `--skip-blocks LIST`: MOSS-Image only, the blocks its negative prompt's pass leaves out, e.g. `22,24` (`""` for
-  none; default the model's, 22). Leave it out unless the user asks.
+- `--skip-blocks LIST`: MOSS-Image only, the blocks its negative prompt's pass leaves out, e.g. `22,24` (22, 24
+  and 26 are the ones its makers suggest; `""` for none, which looks more photographic but can lose detail; default
+  the model's, 22). Leave it out unless the user asks.
 - `--layout DRAFT`: a MOSS-Image layout in place of size and prompt (see "Layouts").
 
 The environment, set by the user: `MAKO_IMAGE_URL` and `MAKO_IMAGE_API_KEY` (the server), `MAKO_IMAGE_DIR` (where
