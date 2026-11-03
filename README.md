@@ -73,7 +73,8 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   `skip_blocks` set its defaults; `adapter` (MOSS-Image) a data-space distillation adapter (below). The directory is
   read on each request: models and LoRAs added later count.
 - `GET /v1/images/models` lists the models: `id`, `family` (which model it is), `description`, `prompting`,
-  `default`, `loaded`, `steps`, `guidance`, `sampler` and `skip_blocks` where set, and the default `loras` with their
+  `default`, `loaded`, `steps`, `guidance`, `sampler` and `skip_blocks` where set, `image_to_image` when it takes
+  a starting image, and the default `loras` with their
   scales (and `merge` where set).
 - MOSS-Image also takes a layout as its prompt: compact JSON with a caption for the whole image and a box per
   character, object or text (`{"summary": {"caption": ...}, "items": [{"label": "character", "caption": ...,
@@ -92,7 +93,11 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   MOSS-Image 3, Anima 4, SDXL 6), `sampler` (`euler`; `euler_a`, Euler ancestral, for SDXL only; `er_sde`, the
   three-stage extended reverse-time SDE solver, which adds noise each step; default the model directory's, else the
   model's: Euler, SDXL Euler a), `skip_blocks` (MOSS-Image: the blocks the negative prompt's pass leaves out, e.g. `[22,
-  24]`; default `[22]`, as its reference), `seed` (a whole number, as a string past 2^53, as the PNG records it; the
+  24]`; default `[22]`, as its reference), `image` (MOSS-Image: an image file in base64, or a `data:` URL, to
+  start from: scaled to cover the size and centred; without `size`, its own size scaled down to 1024x1024 pixels' area
+  when larger, in multiples of 32) with `strength` (above 0, at most 1; default 0.75: the share of the steps run on it,
+  rounded to whole steps, below 1 at least the first left out; the image noised to the first one's level; more
+  changes more; the PNG records the share run), `seed` (a whole number, as a string past 2^53, as the PNG records it; the
   images of one request take seed, seed + 1, ...; the same seed and settings give the same image) and `loras` (below). A negative prompt runs the transformer twice a step, so
   the image takes about twice as long; without one, nothing changes. Qwen-Image follows it well (scales 2 to 6 tried).
   Krea 2 Turbo was distilled to run without it: at 1.5-2 the negative prompt shows a little, at 3 the image turns flat
@@ -155,7 +160,8 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   tags up in Danbooru's tag list and checks the prompt's (`scripts/tags.py`; the list as a1111-sd-webui-tagcomplete ships it, `name,category,posts,"aliases"`, at
   `~/models/tags/danbooru.csv` or `MAKO_TAGS_CSV`). Its script saves to `~/Pictures/mako` (`MAKO_IMAGE_DIR`) and opens
   the image; `MAKO_IMAGE_URL` (default `http://127.0.0.1:8082/v1`) and `MAKO_IMAGE_API_KEY` point it at the server.
-- Not yet: condition images (edits, references; `/v1/images/edits`) and image to image.
+- Not yet: condition images (edits, references; `/v1/images/edits`), and image to image for the other models (their
+  VAEs' encoders).
 
 
 ## Tests

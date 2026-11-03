@@ -15,9 +15,11 @@
 #include <cstdio>
 #include <filesystem>
 #include <format>
+#include <optional>
 #include <random>
 #include <span>
 #include <stdexcept>
+#include <tuple>
 
 namespace mako::server {
 
@@ -49,6 +51,38 @@ std::string base64(std::span<const uint8_t> in)
         out += kTable[(v >> 12) & 63];
         out += i + 1 < in.size() ? kTable[(v >> 6) & 63] : '=';
         out += i + 2 < in.size() ? kTable[v & 63] : '=';
+    }
+    return out;
+}
+
+// Base64 (a "data:...;base64," prefix allowed); nullopt on anything else.
+std::optional<std::vector<uint8_t>> unbase64(std::string_view s)
+{
+    if (s.starts_with("data:")) {
+        const auto comma = s.find(',');
+        if (comma == s.npos || s.substr(0, comma).find(";base64") == s.npos)
+            return std::nullopt;
+        s.remove_prefix(comma + 1);
+    }
+    std::vector<uint8_t> out;
+    out.reserve(s.size() / 4 * 3);
+    uint32_t acc = 0, bits = 0;
+    for (const char ch : s) {
+        int v = ch >= 'A' && ch <= 'Z' ? ch - 'A' : ch >= 'a' && ch <= 'z' ? ch - 'a' + 26
+              : ch >= '0' && ch <= '9' ? ch - '0' + 52 : ch == '+' || ch == '-' ? 62 : ch == '/' || ch == '_' ? 63 : -1;
+        if (ch == '=')
+            break;
+        if (v < 0) {
+            if (ch == '\n' || ch == '\r' || ch == ' ')
+                continue;
+            return std::nullopt;
+        }
+        acc = acc << 6 | uint32_t(v);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(uint8_t(acc >> bits));
+        }
     }
     return out;
 }
@@ -88,6 +122,7 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
     if (prompt.size() > kMaxImagePrompt)
         return fail(400, std::format("prompt is longer than {} bytes", kMaxImagePrompt), "invalid_request_error");
     uint32_t n = 1, width = 1024, height = 1024;
+    bool sized = false;
     if (body.contains("n")) {
         if (!body["n"].is_number() || body["n"].get_number() < 1 || body["n"].get_number() > 4)
             return fail(400, "n must be 1 to 4", "invalid_request_error");
@@ -103,6 +138,7 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
                         "invalid_request_error");
         width = w;
         height = h;
+        sized = true;
     }
     if (body.contains("response_format") && body["response_format"].is_string() &&
         body["response_format"].get_string() != "b64_json")
@@ -187,6 +223,37 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
             return fail(400, "seed must be a whole number from 0 (a string past 2^53)", "invalid_request_error");
         seed = x;
     }
+    // Image to image: the image to start from (base64) and the share of the steps run on it.
+    std::vector<float> start;
+    float strength = 0.75f;
+    if (body.contains("image") && !body["image"].is_null()) {
+        const auto bytes = body["image"].is_string() ? unbase64(body["image"].get_string()) : std::nullopt;
+        if (!bytes || bytes->empty())
+            return fail(400, "image must be an image file in base64", "invalid_request_error");
+        if (!model.options.adapter.empty())
+            return fail(400, std::format("image: {} runs its adapter's sampler, from noise only", model.name),
+                        "invalid_request_error");
+        if (!image::Engine::encodes_images(model.family))
+            return fail(400, std::format("image: {} cannot start from an image yet", model.name),
+                        "invalid_request_error");
+        if (body.contains("strength") && !body["strength"].is_null()) {
+            const auto& v = body["strength"];
+            if (!v.is_number() || !(v.get_number() > 0) || v.get_number() > 1)
+                return fail(400, "strength must be a number above 0, at most 1", "invalid_request_error");
+            strength = float(v.get_number());
+        }
+        try {
+            if (!sized) {
+                const auto [w, h] = image::image_size(*bytes);
+                std::tie(width, height) = image::start_size(w, h);
+            }
+            start = image::decode_image(*bytes, width, height);
+        } catch (const std::exception& e) {
+            return fail(400, std::format("image: {}", e.what()), "invalid_request_error");
+        }
+    } else if (body.contains("strength") && !body["strength"].is_null()) {
+        return fail(400, "strength goes with an image", "invalid_request_error");
+    }
     bool jpeg = false;
     if (body.contains("output_format") && body["output_format"].is_string()) {
         const std::string f = body["output_format"].get_string();
@@ -205,8 +272,9 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
         lora_names += std::format("{}{} {:g}{}", lora_names.empty() ? ", LoRAs " : ", ",
                                   std::filesystem::path(l.path).stem().string(), l.scale,
                                   !l.merge ? "" : *l.merge ? " merged" : " unmerged");
-    log::info("{}: {} image{} {}x{} with {}{}{}, waiting for the image model", id, n, n > 1 ? "s" : "", width, height,
-              model.name, negative ? ", a negative prompt" : "", lora_names);
+    log::info("{}: {} image{} {}x{} with {}{}{}{}, waiting for the image model", id, n, n > 1 ? "s" : "", width,
+              height, model.name, negative ? ", a negative prompt" : "", lora_names,
+              start.empty() ? "" : std::format(", from an image (strength {:g})", strength));
     std::string data = "[";
     try {
         std::string key = model.key();
@@ -226,6 +294,8 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
             r.guidance = guidance;
             r.sampler = sampler;
             r.skip_blocks = skip_blocks;
+            r.image = start;
+            r.strength = strength;
             auto last = std::chrono::steady_clock::now();
             const auto t0 = last;
             r.progress = [&](uint32_t step, uint32_t steps) {
@@ -316,6 +386,8 @@ void ImageServer::Impl::image_model_list(httplib::Response& res)
                 b += std::format("{}{}", b.empty() ? "" : ",", i);
             data += std::format(R"(,"skip_blocks":[{}])", b);
         }
+        if (image::Engine::encodes_images(m.family) && m.options.adapter.empty())
+            data += R"(,"image_to_image":true)";
         std::string l;
         for (const auto& x : m.loras)
             l += std::format(R"({}{{"name":{},"scale":{:g}{}}})", l.empty() ? "" : ",",

@@ -91,6 +91,7 @@ kernel void im2col3x3(device const float* x [[buffer(0)]], device half* out [[bu
 // pixels (2y + ky - 1, 2x + kx - 1) of the h x w input. Grid (kpad, rows).
 struct Im2colS2Args {
     uint h, w, c, p0, rows, kpad, ow;
+    uint pad; // above and left of the image: 1, or 0 (then only below and right)
 };
 kernel void im2col3x3_s2(device const float* x [[buffer(0)]], device half* out [[buffer(1)]],
                          constant Im2colS2Args& a [[buffer(2)]], uint2 gid [[thread_position_in_grid]])
@@ -101,7 +102,7 @@ kernel void im2col3x3_s2(device const float* x [[buffer(0)]], device half* out [
     float v = 0.0f;
     if (col < 9 * a.c) {
         const uint ch = col / 9, kk = col % 9, p = a.p0 + r;
-        const int y = int(p / a.ow) * 2 + int(kk / 3) - 1, xx = int(p % a.ow) * 2 + int(kk % 3) - 1;
+        const int y = int(p / a.ow) * 2 + int(kk / 3) - int(a.pad), xx = int(p % a.ow) * 2 + int(kk % 3) - int(a.pad);
         if (y >= 0 && y < int(a.h) && xx >= 0 && xx < int(a.w))
             v = x[(uint64_t(y) * a.w + uint(xx)) * a.c + ch];
     }

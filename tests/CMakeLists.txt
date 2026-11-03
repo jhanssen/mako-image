@@ -26,7 +26,7 @@ set_tests_properties(unigram PROPERTIES LABELS image SKIP_RETURN_CODE 77)
 # MOSS-Image against the reference pipeline's tensors (MAKO_MOSS_REF).
 add_executable(moss_ref_test moss_ref_test.cpp)
 target_link_libraries(moss_ref_test PRIVATE mako_imagegen mako_text glaze_headers)
-foreach(m tokens text dit vae pipeline lora)
+foreach(m tokens text dit vae encode pipeline lora)
     add_test(NAME moss_${m} COMMAND moss_ref_test "${MAKO_MOSS}" "${MAKO_MOSS_REF}" ${m})
     set_tests_properties(moss_${m} PROPERTIES LABELS image SKIP_RETURN_CODE 77)
 endforeach()

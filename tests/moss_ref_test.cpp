@@ -5,6 +5,7 @@
 //   dit      the transformer on the reference's text states and latents: stages of the first step's two passes and
 //            every pass's prediction (the negative prompt's skipping a block)
 //   vae      the VAE decoder on the reference's final latents
+//   encode   the VAE encoder on the reference's image: its stages and the normalized, packed latents
 //   pipeline the prompt to the image (the reference's starting noise)
 //   lora     a made-up LoRA (rank 16 on every projection of three blocks, far above BF16's rounding) added unmerged
 //            twice at 0.5, then merged at -1: the output must come back to the one without it (what is left, ~2e-3,
@@ -269,6 +270,32 @@ int main(int argc, char** argv)
         const Diff d = diff(transposed(rgb, size_t(size) * size, 3), read_f32(ref / "vae_out.f32"), size_t(size) * size);
         check(d.rel < 0.02, std::format("{}x{} RGB: rel error {:.2e}, lowest channel cosine {:.5f}", size, size, d.rel,
                                         d.min_cos));
+    } else if (mode == "encode") {
+        std::map<std::string, std::vector<float>> stages;
+        engine.set_probe([&](const std::string& name, int layer, const float* data, size_t n) {
+            stages[name + (layer >= 0 ? std::to_string(layer) : "")].assign(data, data + n);
+        });
+        const auto in = read_f32(ref / "enc_in.f32"); // [3][H][W]
+        const size_t px = size_t(size) * size;
+        std::vector<float> rgba(px * 4, 1.0f);
+        for (size_t p = 0; p < px; ++p)
+            for (int c = 0; c < 3; ++c)
+                rgba[p * 4 + c] = in[c * px + p];
+        const auto lat = engine.encode(rgba, g, g);
+        for (const char* st : {"enc_down0", "enc_down1", "enc_down2", "enc_down3", "enc_mid"}) {
+            const auto s = shape(st);
+            const auto w = read_f32(ref / std::format("{}.f32", st));
+            const auto& gs = stages[st];
+            if (gs.size() != w.size()) {
+                check(false, std::format("{}: {} values, the reference {}", st, gs.size(), w.size()));
+                continue;
+            }
+            const Diff ds = diff(transposed(gs, s[1] * s[2], s[0]), w, w.size());
+            std::println("        {}: rel error {:.2e}", st, ds.rel);
+        }
+        const Diff d = diff(transposed(lat, N, 128), read_f32(ref / "enc_latents.f32"), N);
+        check(d.rel < 0.01, std::format("{}x{} latents: rel error {:.2e}, lowest channel cosine {:.5f}", size, size,
+                                        d.rel, d.min_cos));
     } else if (mode == "pipeline") {
         const auto sig = engine.sigmas(uint32_t(manifest["steps"].get_number()), N, std::nullopt);
         double worst = 0;

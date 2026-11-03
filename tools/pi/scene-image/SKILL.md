@@ -209,7 +209,7 @@ uses unless told otherwise, at the scale shown.
 
 ## Options
 
-`scripts/render.sh [options] WIDTHxHEIGHT "<prompt>"`, or `scripts/render.sh [options] --layout DRAFT`:
+`scripts/render.sh [options] WIDTHxHEIGHT|auto "<prompt>"`, or `scripts/render.sh [options] --layout DRAFT`:
 
 - `--model NAME`: the image model (default: the server's default).
 - `--lora NAME[:SCALE]` (repeatable): exactly these LoRAs in place of the model's defaults; `--no-loras`: none (see
@@ -235,6 +235,13 @@ uses unless told otherwise, at the scale shown.
   the model's, 22). Leave it out unless the user asks.
 - `--seed N`: the noise's seed; the same seed and settings give the same image. Without it each render gets a new
   one (the PNG records it). Use it to compare one change at a time, or when the user wants a render repeated.
+- `--image FILE` (MOSS-Image): start from this image instead of noise; with `auto` as the size, the image's own (up
+  to about 1024x1024). `--strength F` (above 0, below 1; default 0.75): the share of the steps redrawn, rounded to
+  whole steps (with 8 steps, 0.85 and up runs 7 of 8). The prompt still describes the whole image. Tried with
+  moss-sft-dmd: up to 0.75 the image barely changes; at 0.85-0.9 composition, poses and colours stay while faces,
+  clothing and background are redrawn. Another style or medium in the prompt did not take (a photo stayed a photo,
+  flat coloured shapes stayed a flat illustration). Words asked for in the prompt (a caption) appeared at 0.75
+  (small) and 0.85 (clear), the rest redrawn as above.
 - `--layout DRAFT`: a MOSS-Image layout in place of size and prompt (see "Layouts").
 
 The environment, set by the user: `MAKO_IMAGE_URL` and `MAKO_IMAGE_API_KEY` (the server), `MAKO_IMAGE_DIR` (where

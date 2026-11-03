@@ -58,6 +58,8 @@ public:
     // Whether a family's negative prompt pass can leave blocks out (Request::skip_blocks).
     static bool skips_blocks(const std::string& family) { return family == "MOSS-Image"; }
     static bool keeps_loras_unmerged(const std::string& family) { return family == "MOSS-Image"; }
+    // Whether the family's VAE encodes images (image to image): the ones encode() takes.
+    static bool encodes_images(const std::string& family) { return family == "MOSS-Image"; }
 
     virtual ~Engine() = default;
 
@@ -96,9 +98,16 @@ public:
         // Transformer blocks the negative prompt's pass leaves out (zero-based; skips_blocks() models only); unset:
         // the model's.
         std::optional<std::vector<uint32_t>> skip_blocks;
+        // Image to image: the image to start from, RGBA [height][width][4] in [-1, 1], noised to the level the
+        // schedule is `strength` of the way up from its end, and only the steps from there run (1: from the top).
+        std::span<const float> image;
+        float strength = 1.0f;
         std::function<void(uint32_t step, uint32_t steps)> progress;
     };
-    // Text to image: RGBA [height][width][4] in [-1, 1].
+    // Image to image: the first of `steps` steps to run at `strength` (the share run, rounded to whole steps; below 1
+    // at least one left out, at most all but one).
+    static uint32_t start_step(uint32_t steps, float strength);
+    // Text (and image) to image: RGBA [height][width][4] in [-1, 1].
     std::vector<float> generate(const Request& r);
     // What generate() makes of r (its steps, guidance and negative prompt in effect), for the image's metadata; the
     // caller adds the model's name and LoRAs.
@@ -121,6 +130,10 @@ public:
 
     // The VAE decoder: transformer latents [h * w][latent_width()] (normalized) to RGBA [16h][16w][4] in [-1, 1].
     std::vector<float> decode(std::span<const float> latents, uint32_t h, uint32_t w);
+    // The VAE encoder: RGBA [16h][16w][4] in [-1, 1] (alpha unused) to transformer latents [h * w][latent_width()]
+    // (normalized), the posterior's mean. Its weights load with the first call. AutoencoderKL VAEs in Diffusers' names
+    // only (MOSS-Image's); throws for the others.
+    std::vector<float> encode(std::span<const float> rgba, uint32_t h, uint32_t w);
     // A transformer token's latent values: the VAE's channels times the pixels of its patch.
     uint32_t latent_width() const { return lat_; }
 
@@ -163,6 +176,7 @@ protected:
     struct Conv {
         Tensor w, b;
         uint32_t cin = 0, cout = 0, k = 3, kpad = 0, stride = 1;
+        uint32_t pad = 1; // stride 2: padding above and left (below and right always 1)
     };
     // `name`.weight and .bias (F32, F16 or BF16): a convolution (or a linear layer, as a 1x1), or several of one
     // input's with their outputs side by side.
@@ -273,6 +287,24 @@ private:
     void load_vae();
     // The AutoencoderKL layout (FLUX.2's and SDXL's): group norms, separate q, k, v, upsamplers' plain convolutions.
     void load_vae_kl();
+    Res load_res_kl(const std::string& prefix);
+    // The mid block's single-head attention over an h x w image, added to x; t1, t2, t3 scratch.
+    void vae_attention(MTL::ComputeCommandEncoder*& enc, const Tensor& g, const Tensor* b, const Conv& qkv,
+                       const Conv& proj, MTL::Buffer* x, uint32_t h, uint32_t w, MTL::Buffer* t1, MTL::Buffer* t2,
+                       MTL::Buffer* t3);
+    struct Down {
+        std::vector<Res> res;
+        bool down = false;
+        Conv conv;
+    };
+    struct VaeEncoder {
+        Conv in, out, quant, qkv, proj;
+        Res mid0, mid1;
+        Tensor attn_g, attn_b, out_g, out_b;
+        std::vector<Down> downs;
+    };
+    void load_encoder_kl();
+    std::unique_ptr<VaeEncoder> venc_;
     // A VAE tensor's name in the file (the Diffusers layout's, or the original one's).
     std::string vk(const std::string& name) const;
     // A VAE convolution by its Diffusers name.

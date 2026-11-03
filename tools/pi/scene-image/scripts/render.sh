@@ -1,7 +1,8 @@
 #!/bin/sh
 # Renders an image with mako_image_serve's /v1/images/generations and saves it as a PNG.
 #   render.sh [--model NAME] [--lora NAME[:SCALE][:merge|:unmerged]]... [--no-loras] [--steps N] [--negative TEXT]
-#             [--guidance F] [--sampler NAME] [--skip-blocks LIST] [--seed N] WIDTHxHEIGHT "prompt"
+#             [--guidance F] [--sampler NAME] [--skip-blocks LIST] [--seed N] [--image FILE [--strength F]]
+#             WIDTHxHEIGHT|auto "prompt"
 #   render.sh [options] --layout DRAFT     (MOSS-Image: a layout draft, see layout.py, as a file, - for standard input or
 #                                           the JSON itself; the size comes from the draft)
 # --model renders with that image model (default: the server's); --lora (repeatable) with these LoRAs in place of the
@@ -10,7 +11,9 @@
 # not show (a second transformer pass a step); --guidance its scale (default: the model's); --sampler euler, euler_a
 # (SDXL models only) or er_sde (default: the model's); --skip-blocks the blocks the negative prompt's pass leaves out,
 # e.g. 22,24 ("" for none; MOSS-Image only; default: the model's); --seed N the noise's seed (default: a new one each
-# render; the PNG records it).
+# render; the PNG records it); --image FILE starts from that image (MOSS-Image), scaled to cover the size and
+# centred, --strength the share of the steps run on it (0 to 1, default 0.75: more changes more); size "auto" takes
+# the image's (at most 1024x1024 pixels' area).
 # MAKO_IMAGE_URL (mako_image_serve; default http://127.0.0.1:8082/v1), MAKO_IMAGE_API_KEY (when the server wants
 # one), MAKO_IMAGE_DIR (default ~/Pictures/mako), MAKO_IMAGE_OPEN=0 (not opened in the image viewer). Prints the saved
 # file's path.
@@ -18,7 +21,7 @@ set -eu
 usage() {
     echo "usage: render.sh [--model NAME] [--lora NAME[:SCALE][:merge|:unmerged]]... [--no-loras] [--steps N]" >&2
     echo "                 [--negative TEXT] [--guidance F] [--sampler NAME] [--skip-blocks LIST] [--seed N]" >&2
-    echo "                 WIDTHxHEIGHT \"prompt\"" >&2
+    echo "                 [--image FILE [--strength F]] WIDTHxHEIGHT|auto \"prompt\"" >&2
     echo "       render.sh [options] --layout DRAFT.json|-|'{...}'" >&2
     exit 2
 }
@@ -30,6 +33,8 @@ sampler=
 skip=
 skip_set=
 seed=
+image=
+strength=
 model=
 layout=
 while [ $# -gt 0 ]; do
@@ -81,6 +86,17 @@ while [ $# -gt 0 ]; do
         seed=$2
         shift 2
         ;;
+    --image)
+        [ $# -ge 2 ] || usage
+        image=$2
+        [ -r "$image" ] || { echo "render.sh: cannot read $image" >&2; exit 2; }
+        shift 2
+        ;;
+    --strength)
+        [ $# -ge 2 ] || usage
+        strength=$2
+        shift 2
+        ;;
     --no-loras)
         loras="
 "
@@ -93,8 +109,8 @@ done
 if [ -n "$layout" ]; then
     [ $# -eq 0 ] || usage
     compiled=$(python3 "$(dirname "$0")/layout.py" "$layout")
-    size=$(printf '%s\n' "$compiled" | head -n 1)
-    prompt=$(printf '%s\n' "$compiled" | tail -n +2)
+    size=$(printf '%s\n' "$compiled" | sed -n 1p)
+    prompt=$(printf '%s\n' "$compiled" | sed -n 2p)
 else
     [ $# -eq 2 ] || usage
     size=$1
@@ -105,11 +121,22 @@ dir=${MAKO_IMAGE_DIR:-$HOME/Pictures/mako}
 mkdir -p "$dir"
 base="$dir/$(date +%Y%m%d-%H%M%S)"
 tmp=$(mktemp)
-trap 'rm -f "$tmp"' EXIT
-body=$(SIZE=$size PROMPT=$prompt LORAS=$loras STEPS=$steps MODEL=$model NEGATIVE=$negative GUIDANCE=$guidance \
-    SAMPLER=$sampler SKIP=$skip SKIP_SET=$skip_set SEED=$seed python3 -c '
+req=$(mktemp)
+trap 'rm -f "$tmp" "$req"' EXIT
+REQ=$req SIZE=$size PROMPT=$prompt LORAS=$loras STEPS=$steps MODEL=$model NEGATIVE=$negative GUIDANCE=$guidance \
+    SAMPLER=$sampler SKIP=$skip SKIP_SET=$skip_set SEED=$seed IMAGE=$image STRENGTH=$strength python3 -c '
 import json, os, sys
 b = {"prompt": os.environ["PROMPT"], "size": os.environ["SIZE"], "n": 1, "response_format": "b64_json"}
+if os.environ["IMAGE"]:
+    import base64
+    b["image"] = base64.b64encode(open(os.environ["IMAGE"], "rb").read()).decode()
+if os.environ["STRENGTH"]:
+    if not os.environ["IMAGE"]:
+        sys.exit("--strength goes with --image")
+    try:
+        b["strength"] = float(os.environ["STRENGTH"])
+    except ValueError:
+        sys.exit("--strength takes a number")
 if os.environ["MODEL"]:
     b["model"] = os.environ["MODEL"]
 if os.environ["STEPS"]:
@@ -149,10 +176,10 @@ if os.environ["LORAS"]:
         except ValueError:
             lora["name"] = spec
         b["loras"].append(lora)
-print(json.dumps(b))')
+json.dump(b, open(os.environ["REQ"], "w"))' || exit 2
 status=$(curl -sS -o "$tmp" -w '%{http_code}' --max-time 1800 "$url/images/generations" \
     -H 'Content-Type: application/json' ${MAKO_IMAGE_API_KEY:+-H "Authorization: Bearer $MAKO_IMAGE_API_KEY"} \
-    -d "$body")
+    --data-binary @"$req")
 out=$(BASE=$base STATUS=$status python3 - "$tmp" <<'PY'
 import base64, json, os, sys
 try:

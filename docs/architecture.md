@@ -46,7 +46,10 @@ came out a few percent off.
   channel) with one attention layer (heads of 256, a sigmoid output gate, the first 64 values rotated). Two refiner
   blocks (with biases) bring it to 3072 wide.
 - VAE: FLUX.2's small decoder: 32 channels, 8x, the transformer's tokens its 2x2 patches normalized by a batch norm's
-  statistics; group norms, a single-head mid attention.
+  statistics; group norms, a single-head mid attention. Its encoder (loaded with the first image to start from) is
+  the same parts down: stride-2 convolutions padded only below and right, the posterior's mean packed and normalized
+  as the decoder's input. Image to image runs the schedule's last `strength` share of steps from the image noised to
+  the first of them, (1 - sigma) image + sigma noise.
 - Schedule: shift 5 on a linear grid, snapped to the 1000 training levels; 50 steps. Guidance 3 always, against an
   empty negative prompt unless one is given, that pass skipping block 22, as the reference runs it (other blocks:
   `skip_blocks`).
