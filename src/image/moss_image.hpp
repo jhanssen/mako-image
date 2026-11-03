@@ -38,6 +38,9 @@ protected:
     void lora_merged() override;
     bool keeps_loras_unmerged() const override { return true; }
     const DataSpace* data_space() const override { return ds_.codes.empty() ? nullptr : &ds_; }
+    bool has_control() const override { return ctrl_; }
+    void set_control(std::vector<float> color, std::vector<float> depth) override;
+    void control_on(bool color, bool depth) override;
 
 private:
     // q | k | v in one matrix; the FFN's activation input and its gate in another.
@@ -50,9 +53,13 @@ private:
     };
     void load_transformer(const safetensors::Files& f);
     void load_adapter(const std::string& dir);
+    void load_control(const std::string& path);
     // Rotary angles for an h x w image followed by S text tokens: (0, S, y, x) and (0, t, 0, 0), image centred.
     void rope_table(MTL::Buffer* cs, uint32_t S, uint32_t h, uint32_t w) const;
 
+    // With a control adapter, img_in_ takes [latents | colour map | depth map] (3 x 128 per token).
+    bool ctrl_ = false, color_on_ = false, depth_on_ = false;
+    std::vector<float> ctrl_color_, ctrl_depth_; // the maps' latents, [N][128] each; empty: none
     Tensor img_in_, img_in_b_, txt_proj_, txt_proj_b_, t1_, t1_b_, t2_, t2_b_, mod_, mod_b_, head_mod_, head_mod_b_;
     Tensor out_norm_, out_, norms_; // norms_: each block's two norm scales, [blocks][2][D]
     std::vector<Block> blocks_;

@@ -2,7 +2,7 @@
 # Renders an image with mako_image_serve's /v1/images/generations and saves it as a PNG.
 #   render.sh [--model NAME] [--lora NAME[:SCALE][:merge|:unmerged]]... [--no-loras] [--steps N] [--negative TEXT]
 #             [--guidance F] [--sampler NAME] [--skip-blocks LIST] [--seed N] [--image FILE [--strength F]]
-#             WIDTHxHEIGHT|auto "prompt"
+#             [--color-map FILE] [--depth-map FILE] [--color-end F] [--depth-end F] WIDTHxHEIGHT|auto "prompt"
 #   render.sh [options] --layout DRAFT     (MOSS-Image: a layout draft, see layout.py, as a file, - for standard input or
 #                                           the JSON itself; the size comes from the draft)
 # --model renders with that image model (default: the server's); --lora (repeatable) with these LoRAs in place of the
@@ -13,7 +13,9 @@
 # e.g. 22,24 ("" for none; MOSS-Image only; default: the model's); --seed N the noise's seed (default: a new one each
 # render; the PNG records it); --image FILE starts from that image (MOSS-Image), scaled to cover the size and
 # centred, --strength the share of the steps run on it (0 to 1, default 0.75: more changes more); size "auto" takes
-# the image's (at most 1024x1024 pixels' area).
+# the image's (at most 1024x1024 pixels' area). --color-map FILE (a flat colour per subject) and --depth-map FILE
+# (near white) steer the layout on a model with a control adapter, each for the first --color-end / --depth-end share
+# of the steps (0 to 1, default 1); a layout draft's color_map / depth_map are passed the same way.
 # MAKO_IMAGE_URL (mako_image_serve; default http://127.0.0.1:8082/v1), MAKO_IMAGE_API_KEY (when the server wants
 # one), MAKO_IMAGE_DIR (default ~/Pictures/mako), MAKO_IMAGE_OPEN=0 (not opened in the image viewer). Prints the saved
 # file's path.
@@ -21,7 +23,8 @@ set -eu
 usage() {
     echo "usage: render.sh [--model NAME] [--lora NAME[:SCALE][:merge|:unmerged]]... [--no-loras] [--steps N]" >&2
     echo "                 [--negative TEXT] [--guidance F] [--sampler NAME] [--skip-blocks LIST] [--seed N]" >&2
-    echo "                 [--image FILE [--strength F]] WIDTHxHEIGHT|auto \"prompt\"" >&2
+    echo "                 [--image FILE [--strength F]] [--color-map FILE] [--depth-map FILE]" >&2
+    echo "                 [--color-end F] [--depth-end F] WIDTHxHEIGHT|auto \"prompt\"" >&2
     echo "       render.sh [options] --layout DRAFT.json|-|'{...}'" >&2
     exit 2
 }
@@ -35,6 +38,10 @@ skip_set=
 seed=
 image=
 strength=
+color_map=
+depth_map=
+color_end=
+depth_end=
 model=
 layout=
 while [ $# -gt 0 ]; do
@@ -92,6 +99,17 @@ while [ $# -gt 0 ]; do
         [ -r "$image" ] || { echo "render.sh: cannot read $image" >&2; exit 2; }
         shift 2
         ;;
+    --color-map | --depth-map)
+        [ $# -ge 2 ] || usage
+        [ -r "$2" ] || { echo "render.sh: cannot read $2" >&2; exit 2; }
+        if [ "$1" = --color-map ]; then color_map=$2; else depth_map=$2; fi
+        shift 2
+        ;;
+    --color-end | --depth-end)
+        [ $# -ge 2 ] || usage
+        if [ "$1" = --color-end ]; then color_end=$2; else depth_end=$2; fi
+        shift 2
+        ;;
     --strength)
         [ $# -ge 2 ] || usage
         strength=$2
@@ -111,6 +129,11 @@ if [ -n "$layout" ]; then
     compiled=$(python3 "$(dirname "$0")/layout.py" "$layout")
     size=$(printf '%s\n' "$compiled" | sed -n 1p)
     prompt=$(printf '%s\n' "$compiled" | sed -n 2p)
+    maps=$(printf '%s\n' "$compiled" | sed -n 3p)
+    if [ -n "$maps" ]; then
+        [ -n "$color_map" ] || color_map=$(MAPS=$maps python3 -c 'import json, os; print(json.loads(os.environ["MAPS"]).get("color_map", ""))')
+        [ -n "$depth_map" ] || depth_map=$(MAPS=$maps python3 -c 'import json, os; print(json.loads(os.environ["MAPS"]).get("depth_map", ""))')
+    fi
 else
     [ $# -eq 2 ] || usage
     size=$1
@@ -124,12 +147,27 @@ tmp=$(mktemp)
 req=$(mktemp)
 trap 'rm -f "$tmp" "$req"' EXIT
 REQ=$req SIZE=$size PROMPT=$prompt LORAS=$loras STEPS=$steps MODEL=$model NEGATIVE=$negative GUIDANCE=$guidance \
-    SAMPLER=$sampler SKIP=$skip SKIP_SET=$skip_set SEED=$seed IMAGE=$image STRENGTH=$strength python3 -c '
+    SAMPLER=$sampler SKIP=$skip SKIP_SET=$skip_set SEED=$seed IMAGE=$image STRENGTH=$strength \
+    COLOR_MAP=$color_map DEPTH_MAP=$depth_map COLOR_END=$color_end DEPTH_END=$depth_end python3 -c '
 import json, os, sys
 b = {"prompt": os.environ["PROMPT"], "size": os.environ["SIZE"], "n": 1, "response_format": "b64_json"}
 if os.environ["IMAGE"]:
     import base64
     b["image"] = base64.b64encode(open(os.environ["IMAGE"], "rb").read()).decode()
+control = {}
+for key in ("color", "depth"):
+    path = os.environ[key.upper() + "_MAP"]
+    if path:
+        import base64
+        control[key] = base64.b64encode(open(path, "rb").read()).decode()
+    end = os.environ[key.upper() + "_END"]
+    if end:
+        try:
+            control[key + "_end"] = float(end)
+        except ValueError:
+            sys.exit(f"--{key}-end takes a number")
+if control:
+    b["control"] = control
 if os.environ["STRENGTH"]:
     if not os.environ["IMAGE"]:
         sys.exit("--strength goes with --image")

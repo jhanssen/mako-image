@@ -65,8 +65,12 @@ MossImage::MossImage(const std::string& dir, mtl::Context& ctx, const Options& o
     if (latent_width() != kLatentWidth)
         throw std::runtime_error("vae: tokens not 128 values");
     load_transformer(open_files(opts.transformer.empty() ? dir + "/transformer" : opts.transformer));
+    if (!opts.adapter.empty() && !opts.control.empty())
+        throw std::runtime_error("an adapter's sampler and a control adapter do not go together");
     if (!opts.adapter.empty())
         load_adapter(opts.adapter);
+    if (!opts.control.empty())
+        load_control(opts.control);
     // Frequencies as the reference derives them (its stored copy may be rounded).
     for (uint32_t i = 0; i < 16; ++i)
         bands_[i] = 1.0f / std::pow(10000.0f, float(i) / 16.0f);
@@ -151,6 +155,39 @@ void MossImage::load_transformer(const safetensors::Files& f)
     out_norm_ = vec("final_norm_video.weight");
     out_ = mat("final_linear_video.weight");
     log::info("MOSS-Image transformer: {} blocks, {} text blocks", nb, text_blocks_.size());
+}
+
+void MossImage::load_control(const std::string& path)
+{
+    const auto f = open_files(path);
+    const auto w = f.find("video_embedder.weight");
+    if (!w || w.tensor->dims.size() != 2 || w.tensor->dims[0] != 3 * kLatentWidth || w.tensor->dims[1] != kDim)
+        throw std::runtime_error(std::format("control {}: no [{}][{}] video_embedder.weight", path, kDim,
+                                             3 * kLatentWidth));
+    img_in_ = upload(f, "video_embedder.weight", true);
+    img_in_b_ = upload(f, "video_embedder.bias", false);
+    control_lora_ = true;
+    try {
+        add_lora(path, 1.0f);
+    } catch (...) {
+        control_lora_ = false;
+        throw;
+    }
+    control_lora_ = false;
+    ctrl_ = true;
+    log::info("MOSS-Image control adapter {}", path);
+}
+
+void MossImage::set_control(std::vector<float> color, std::vector<float> depth)
+{
+    ctrl_color_ = std::move(color);
+    ctrl_depth_ = std::move(depth);
+}
+
+void MossImage::control_on(bool color, bool depth)
+{
+    color_on_ = color;
+    depth_on_ = depth;
 }
 
 void MossImage::load_adapter(const std::string& dir)
@@ -411,7 +448,8 @@ std::vector<float> MossImage::step(std::span<const float> latents, float sigma, 
     MTL::Buffer* vh = scratch("d_vh", uint64_t(kHeads) * k_pad * kHeadDim * 2);
     MTL::Buffer* att = scratch("d_att", uint64_t(Tg) * D * 4);
     MTL::Buffer* y = scratch("d_y", uint64_t(Tg) * D * 4);
-    MTL::Buffer* lat = scratch("d_lat", uint64_t(N) * kLatentWidth * 4);
+    const uint32_t L = ctrl_ ? 3 * kLatentWidth : kLatentWidth; // an input row: the latents, then the control maps'
+    MTL::Buffer* lat = scratch("d_lat", uint64_t(N) * L * 4);
     MTL::Buffer* out = scratch("d_out", uint64_t(N) * kLatentWidth * 4);
     MTL::Buffer* tp = scratch("d_tproj", kTimeDim * 4);
     MTL::Buffer* temb = scratch("d_temb", D * 4);
@@ -422,7 +460,29 @@ std::vector<float> MossImage::step(std::span<const float> latents, float sigma, 
     MTL::Buffer* fmod = scratch("d_fmod", 2 * D * 4);
     MTL::Buffer* txt = scratch(std::format("k_txt{}", slot), uint64_t(S) * D * 4);
     MTL::Buffer* cs = scratch(std::format("k_cs{}", slot), uint64_t(T) * kHeadDim / 2 * 8);
-    std::memcpy(lat->contents(), latents.data(), latents.size() * 4);
+    if (!ctrl_) {
+        std::memcpy(lat->contents(), latents.data(), latents.size() * 4);
+    } else {
+        // A map off (or not given) is zeros: "no control", as the adapter was trained.
+        const auto* color = color_on_ && !ctrl_color_.empty() ? ctrl_color_.data() : nullptr;
+        const auto* depth = depth_on_ && !ctrl_depth_.empty() ? ctrl_depth_.data() : nullptr;
+        if ((color && ctrl_color_.size() != latents.size()) || (depth && ctrl_depth_.size() != latents.size()))
+            throw std::runtime_error("control: the maps' latents are not the image's size");
+        auto* p = static_cast<float*>(lat->contents());
+        const uint32_t K = kLatentWidth;
+        for (uint64_t t = 0; t < N; ++t) {
+            float* row = p + t * L;
+            std::copy_n(latents.data() + t * K, K, row);
+            if (color)
+                std::copy_n(color + t * K, K, row + K);
+            else
+                std::fill_n(row + K, K, 0.0f);
+            if (depth)
+                std::copy_n(depth + t * K, K, row + 2 * K);
+            else
+                std::fill_n(row + 2 * K, K, 0.0f);
+        }
+    }
     std::memcpy(static_cast<char*>(x->contents()) + uint64_t(N) * D * 4, txt->contents(), uint64_t(S) * D * 4);
     // Sinusoidal embedding (cos half first) of the timestep, in double as the reference computes it.
     const double t = double(sigma * 1000.0f);
@@ -579,6 +639,23 @@ Engine::LoraTarget MossImage::lora_target(const std::string& module)
             return {&B.up_gate, 0, uint32_t(B.up_gate.dims[1])};
         if (rest == "proj.ffn_down")
             return {&B.down, 0, kDim};
+        return {};
+    }
+    if (std::sscanf(module.c_str(), "text_embedder.blocks.%u.%n", &i, &used) == 1 && used > 0 &&
+        i < text_blocks_.size()) {
+        TextBlock& T = text_blocks_[i];
+        const std::string_view rest = std::string_view(module).substr(size_t(used));
+        const uint32_t nff = uint32_t(T.down.dims[0]);
+        if (rest == "qkv")
+            return {&T.qkv, 0, 3 * kDim};
+        if (rest == "proj")
+            return {&T.o, 0, kDim};
+        if (rest == "ffn_up") // the fused matrix's first rows
+            return {&T.gate_up, 0, nff};
+        if (rest == "ffn_gate")
+            return {&T.gate_up, nff, nff};
+        if (rest == "ffn_down")
+            return {&T.down, 0, kDim};
         return {};
     }
     Tensor* t = module == "video_embedder"             ? &img_in_

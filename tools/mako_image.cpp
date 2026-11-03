@@ -2,6 +2,7 @@
 //   mako_image <model dir> <prompt> [-o out.png] [--width N] [--height N] [--steps N] [--seed N] [--count N] [--rgb]
 //              [--lora FILE[:SCALE] ...] [--terminal F] [--text-encoder DIR] [--transformer PATH] [--adapter DIR]
 //              [--negative TEXT] [--guidance F] [--sampler NAME] [--skip-blocks LIST] [--image FILE] [--strength F]
+//              [--control FILE] [--color-map FILE] [--depth-map FILE] [--color-end F] [--depth-end F]
 //              [--llm URL] [--llm-api-key KEY]
 // --lora adds a LoRA (repeatable; SCALE its strength, default 1; :merge into the weights or :unmerged beside them,
 // default the model's way: unmerged for MOSS-Image). --terminal: the schedule's last
@@ -15,6 +16,8 @@
 // er_sde. --skip-blocks: the blocks the negative prompt's pass leaves out, e.g. 22,24 ("" for none; MOSS-Image).
 // --image: start from this image (MOSS-Image), scaled to cover the size and centred (without --width and --height,
 // its own size, at most 1024x1024 pixels' area); --strength: the share of the steps run on it (default 0.75).
+// --control: a MOSS-Image control adapter; --color-map (a flat colour per subject) and --depth-map (near white) steer
+// the layout, each for the first --color-end / --depth-end share of the steps (default 1).
 // --llm: a mako_serve on this machine whose memory to borrow while the model is loaded (it unloads its LLM meanwhile).
 #include "app/cli.hpp"
 #include "image/engine.hpp"
@@ -60,8 +63,8 @@ int main(int argc, char** argv)
     std::string llm, llm_key;
     std::string out = "image.png";
     uint32_t width = 0, height = 0, steps = 0;
-    std::string image;
-    float strength = 0.75f;
+    std::string image, control, color_map, depth_map;
+    float strength = 0.75f, color_end = 1.0f, depth_end = 1.0f;
     uint64_t seed = 0;
     uint32_t count = 1;
     mako::image::Loras loras;
@@ -108,6 +111,11 @@ int main(int argc, char** argv)
                 })
         .option("--image", "FILE", "start from this image (MOSS-Image)", image)
         .option("--strength", "F", "with --image, the share of the steps run on it (default 0.75)", strength)
+        .option("--control", "FILE", "a MOSS-Image control adapter", control)
+        .option("--color-map", "FILE", "with --control: a colour region map", color_map)
+        .option("--depth-map", "FILE", "with --control: a depth map, near white", depth_map)
+        .option("--color-end", "F", "the share of the steps the colour map steers (default 1)", color_end)
+        .option("--depth-end", "F", "the share of the steps the depth map steers (default 1)", depth_end)
         .option("--terminal", "F", "the schedule's last noise level (0: none)",
                 [&](const std::string& v) { terminal = mako::app::Cli::parse<float>(v); })
         .option("--llm", "URL", "a mako_serve on this machine to borrow memory from", llm)
@@ -126,7 +134,7 @@ int main(int argc, char** argv)
             mako::log::info("the LLM's memory is free ({:.1f} s)", ms_since(t_load) / 1e3);
         }
         mako::mtl::Context ctx;
-        auto model = mako::image::Engine::open(pos[0], ctx, {text_encoder, transformer, adapter});
+        auto model = mako::image::Engine::open(pos[0], ctx, {text_encoder, transformer, adapter, control});
         auto& engine = *model;
         for (const auto& l : loras)
             engine.add_lora(l);
@@ -147,6 +155,16 @@ int main(int argc, char** argv)
         height = height ? height : 1024;
         if (!image.empty())
             start = mako::image::decode_image(bytes, width, height);
+        auto read_map = [&](const std::string& path) {
+            if (path.empty())
+                return std::vector<float>{};
+            std::ifstream f(path, std::ios::binary);
+            const std::vector<uint8_t> b{std::istreambuf_iterator<char>(f), {}};
+            if (b.empty())
+                throw std::runtime_error("cannot read " + path);
+            return mako::image::decode_image(b, width, height);
+        };
+        const auto cmap = read_map(color_map), dmap = read_map(depth_map);
         for (uint32_t n = 0; n < count; ++n) {
             mako::image::Engine::Request r;
             r.prompt = pos[1];
@@ -161,6 +179,7 @@ int main(int argc, char** argv)
             r.skip_blocks = skip_blocks;
             r.image = start;
             r.strength = strength;
+            r.control = {cmap, dmap, color_end, depth_end};
             auto t_step = Clock::now();
             r.progress = [&](uint32_t i, uint32_t total) {
                 mako::log::info("step {} of {}: {:.0f} ms, thermal {}", i, total, ms_since(t_step),

@@ -160,6 +160,13 @@ DRAFT being a file, `-` to read it from standard input (e.g. a heredoc), or the 
 - Optional: `summary.meta`, a list of medium or genre words (`["poster"]`, `["product photography"]`);
   `summary.canvas`, `single` (default), `multi_panel` or `collage`; `palette` (in summary or an item), a list of
   colours. The layout is the whole prompt: put any prose in `summary.caption`.
+- Control maps (a model whose list entry says it takes them): a PNG with a black background and one flat colour per
+  subject, each painted in the shape and pose it should have (a raised arm, legs apart, sitting), steers where each
+  subject is and how it stands; crude shapes work. Give it as the draft's `"color_map": "map.png"` and give each item
+  `"color": "#rrggbb"` in place of `bbox` (the box is taken from the map). An optional `"depth_map"` (grey, near
+  white) orders subjects front to back. End the maps early: `--color-end` / `--depth-end` 0.25 with 8 steps, 0.2-0.4
+  with 50; longer, and the shapes' outlines show in the bodies (a mannequin's segments). Draw a map with a short
+  Python (Pillow) script when the user has none.
 - A layout has positions in the frame, not depth: which subject is in front, or hides part of another, goes in the
   captions ("partly behind the fern"); the order of the items did not change it when tried.
 
@@ -242,6 +249,8 @@ uses unless told otherwise, at the scale shown.
   clothing and background are redrawn. Another style or medium in the prompt did not take (a photo stayed a photo,
   flat coloured shapes stayed a flat illustration). Words asked for in the prompt (a caption) appeared at 0.75
   (small) and 0.85 (clear), the rest redrawn as above.
+- `--color-map FILE`, `--depth-map FILE`, `--color-end F`, `--depth-end F`: control maps for a model with a control
+  adapter (see "Layouts"; a draft's `color_map` / `depth_map` are passed by themselves).
 - `--layout DRAFT`: a MOSS-Image layout in place of size and prompt (see "Layouts").
 
 The environment, set by the user: `MAKO_IMAGE_URL` and `MAKO_IMAGE_API_KEY` (the server), `MAKO_IMAGE_DIR` (where

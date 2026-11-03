@@ -23,6 +23,10 @@ struct Options {
     // A data-space distillation adapter's directory (MOSS-Image): lora.safetensors (kept unmerged),
     // time_embedding.safetensors (F32 time path) and dataspace.safetensors (its sampler).
     std::string adapter;
+    // A control adapter (MOSS-Image): a file widening the image input to [latents | colour map | depth map] (the
+    // maps' VAE latents), with a LoRA trained with it. Requests then steer the layout with the maps
+    // (Request::control).
+    std::string control;
     gpu::Telemetry telemetry = gpu::Telemetry::off;
 };
 
@@ -60,6 +64,8 @@ public:
     static bool keeps_loras_unmerged(const std::string& family) { return family == "MOSS-Image"; }
     // Whether the family's VAE encodes images (image to image): the ones encode() takes.
     static bool encodes_images(const std::string& family) { return family == "MOSS-Image"; }
+    // Whether the family takes a control adapter (Options::control).
+    static bool takes_control(const std::string& family) { return family == "MOSS-Image"; }
 
     virtual ~Engine() = default;
 
@@ -102,6 +108,13 @@ public:
         // schedule is `strength` of the way up from its end, and only the steps from there run (1: from the top).
         std::span<const float> image;
         float strength = 1.0f;
+        // With a control adapter: a colour region map (a flat colour per subject) and a depth map (near white), RGBA
+        // [height][width][4] in [-1, 1], either or neither, each steering the steps before its end (the share of the
+        // steps run).
+        struct Control {
+            std::span<const float> color, depth;
+            float color_end = 1.0f, depth_end = 1.0f;
+        } control;
         std::function<void(uint32_t step, uint32_t steps)> progress;
     };
     // Image to image: the first of `steps` steps to run at `strength` (the share run, rounded to whole steps; below 1
@@ -155,9 +168,17 @@ public:
     uint32_t add_lora(const Lora& l) { return add_lora(l.path, l.scale, l.merge); }
     // Whether LoRAs can stay unmerged (Lora::merge false): the family's (keeps_loras_unmerged(family)).
     virtual bool keeps_loras_unmerged() const { return false; }
+    // Whether a control adapter is loaded (Options::control).
+    virtual bool has_control() const { return false; }
     const text::Tokenizer& tokenizer() const { return *tok_; }
 
 protected:
+    // The control maps' latents for the next generation ([h * w][latent_width()] each, empty: none), and which of them
+    // the next steps see.
+    virtual void set_control(std::vector<float> color, std::vector<float> depth);
+    virtual void control_on(bool color, bool depth);
+    // Set while a control adapter's LoRA is added: its input projection's tensors are the model's to read.
+    bool control_lora_ = false;
     // Which blocks the negative prompt's pass leaves out from here on; throws on blocks the model does not have, or
     // any for a model that skips none.
     virtual void set_skip_blocks(std::span<const uint32_t> blocks);

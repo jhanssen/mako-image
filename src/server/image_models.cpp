@@ -88,6 +88,8 @@ ImageModel load_image_model(const std::string& dir, const std::string& name)
             m.options.text_encoder = resolve(base, *v);
         if (auto v = str("adapter"))
             m.options.adapter = resolve(base, *v);
+        if (auto v = str("control"))
+            m.options.control = resolve(base, *v);
         if (auto v = str("description"))
             m.description = *v;
         if (auto v = str("prompting"))
@@ -140,7 +142,8 @@ ImageModel load_image_model(const std::string& dir, const std::string& name)
             }
         }
     }
-    for (const std::string* p : {&m.options.transformer, &m.options.text_encoder, &m.options.adapter})
+    for (const std::string* p : {&m.options.transformer, &m.options.text_encoder, &m.options.adapter,
+                                 &m.options.control})
         if (!p->empty() && !fs::exists(*p))
             throw std::runtime_error(std::format("{}: {} does not exist", name, *p));
     if (!fs::is_directory(m.dir))
@@ -156,6 +159,10 @@ ImageModel load_image_model(const std::string& dir, const std::string& name)
         throw std::runtime_error(std::format("{}: an adapter runs its own sampler, without guidance", name));
     if (!m.options.adapter.empty() && m.family != "MOSS-Image")
         throw std::runtime_error(std::format("{}: adapters are for MOSS-Image", name));
+    if (!m.options.control.empty() && !image::Engine::takes_control(m.family))
+        throw std::runtime_error(std::format("{}: control adapters are for MOSS-Image", name));
+    if (!m.options.control.empty() && !m.options.adapter.empty())
+        throw std::runtime_error(std::format("{}: an adapter's sampler and a control adapter do not go together", name));
     for (const auto& l : m.loras)
         if (l.merge == false && !image::Engine::keeps_loras_unmerged(m.family))
             throw std::runtime_error(std::format("{}: {} keeps no LoRA unmerged", name, m.family));

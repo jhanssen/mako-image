@@ -12,7 +12,7 @@ namespace mako::server {
 
 // An image model as a directory: its files (the directory, or where its mako.json points) and the settings mako.json
 // gives. mako.json (every field optional, paths relative to its directory):
-//   {"model": DIR, "transformer": PATH, "text_encoder": PATH, "adapter": DIR, "lora_dir": DIR,
+//   {"model": DIR, "transformer": PATH, "text_encoder": PATH, "adapter": DIR, "control": FILE, "lora_dir": DIR,
 //    "loras": {NAME: SCALE or {"scale": SCALE, "merge": BOOL}, ...}, "steps": N, "terminal": F, "guidance": F, "sampler": "euler" | "euler_a" | "er_sde", "skip_blocks": [N, ...],
 //    "description": TEXT, "prompting": TEXT}
 // LoRAs are named by file name without .safetensors, from lora_dir (default: the directory's loras/); "loras" are the
@@ -31,7 +31,8 @@ struct ImageModel {
     // What decides the loaded weights besides LoRAs: two models with the same key load the same.
     std::string key() const
     {
-        return dir + "|" + options.text_encoder + "|" + options.transformer + "|" + options.adapter;
+        return dir + "|" + options.text_encoder + "|" + options.transformer + "|" + options.adapter + "|" +
+               options.control;
     }
 };
 

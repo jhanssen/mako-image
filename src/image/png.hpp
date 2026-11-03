@@ -37,6 +37,7 @@ struct Provenance {
     uint32_t steps = 0, width = 0, height = 0;
     uint64_t seed = 0;
     std::optional<float> strength; // image to image: the share of the steps run on the starting image
+    std::optional<float> color_end, depth_end; // control maps given: the share of the steps each steered
     struct Lora {
         std::string name;
         float scale = 1;

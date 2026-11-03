@@ -254,6 +254,44 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
     } else if (body.contains("strength") && !body["strength"].is_null()) {
         return fail(400, "strength goes with an image", "invalid_request_error");
     }
+    // Control maps (a model with a control adapter): {"color": BASE64, "depth": BASE64, "color_end": F, "depth_end": F}.
+    std::vector<float> color_map, depth_map;
+    float color_end = 1.0f, depth_end = 1.0f;
+    if (body.contains("control") && !body["control"].is_null()) {
+        const auto& c = body["control"];
+        if (!c.is_object())
+            return fail(400, "control must be an object", "invalid_request_error");
+        if (model.options.control.empty())
+            return fail(400, std::format("control: {} has no control adapter", model.name), "invalid_request_error");
+        for (const auto& [k, v] : c.get_object())
+            if (k != "color" && k != "depth" && k != "color_end" && k != "depth_end")
+                return fail(400, std::format("control: unknown field {}", k), "invalid_request_error");
+        for (auto [key, end] : {std::pair{"color_end", &color_end}, {"depth_end", &depth_end}})
+            if (c.contains(key) && !c[key].is_null()) {
+                if (!c[key].is_number() || c[key].get_number() < 0 || c[key].get_number() > 1)
+                    return fail(400, std::format("control.{} must be a number from 0 to 1", key),
+                                "invalid_request_error");
+                *end = float(c[key].get_number());
+            }
+        for (auto [key, out] : {std::pair{"color", &color_map}, {"depth", &depth_map}}) {
+            if (!c.contains(key) || c[key].is_null())
+                continue;
+            const auto bytes = c[key].is_string() ? unbase64(c[key].get_string()) : std::nullopt;
+            if (!bytes || bytes->empty())
+                return fail(400, std::format("control.{} must be an image file in base64", key),
+                            "invalid_request_error");
+            try {
+                if (!sized && start.empty()) { // the first map's size, as an image to start from gives its own
+                    const auto [w, h] = image::image_size(*bytes);
+                    std::tie(width, height) = image::start_size(w, h);
+                    sized = true;
+                }
+                *out = image::decode_image(*bytes, width, height);
+            } catch (const std::exception& e) {
+                return fail(400, std::format("control.{}: {}", key, e.what()), "invalid_request_error");
+            }
+        }
+    }
     bool jpeg = false;
     if (body.contains("output_format") && body["output_format"].is_string()) {
         const std::string f = body["output_format"].get_string();
@@ -296,6 +334,7 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
             r.skip_blocks = skip_blocks;
             r.image = start;
             r.strength = strength;
+            r.control = {color_map, depth_map, color_end, depth_end};
             auto last = std::chrono::steady_clock::now();
             const auto t0 = last;
             r.progress = [&](uint32_t step, uint32_t steps) {
@@ -388,6 +427,8 @@ void ImageServer::Impl::image_model_list(httplib::Response& res)
         }
         if (image::Engine::encodes_images(m.family) && m.options.adapter.empty())
             data += R"(,"image_to_image":true)";
+        if (!m.options.control.empty())
+            data += R"(,"control":true)";
         std::string l;
         for (const auto& x : m.loras)
             l += std::format(R"({}{{"name":{},"scale":{:g}{}}})", l.empty() ? "" : ",",

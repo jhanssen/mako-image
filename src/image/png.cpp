@@ -98,6 +98,10 @@ std::vector<uint8_t> with_provenance(std::vector<uint8_t> png, const Provenance&
                           p.model);
     if (p.strength)
         params += std::format(", Denoising strength: {:g}", *p.strength);
+    if (p.color_end)
+        params += std::format(", Control color end: {:g}", *p.color_end);
+    if (p.depth_end)
+        params += std::format(", Control depth end: {:g}", *p.depth_end);
     std::string loras;
     for (const auto& l : p.loras)
         loras += std::format("{}{{\"name\":{},\"scale\":{:g}{}}}", loras.empty() ? "" : ",", json_string(l.name),
@@ -113,11 +117,13 @@ std::vector<uint8_t> with_provenance(std::vector<uint8_t> png, const Provenance&
         skip += std::format("{}{}", skip.empty() ? "" : ",", b);
     const std::string json = std::format(
         "{{\"prompt\":{},\"negative_prompt\":{},\"model\":{},\"steps\":{},\"guidance\":{:g},\"sampler\":{},"
-        "\"seed\":{},\"width\":{},\"height\":{},\"loras\":[{}]{}{}}}",
+        "\"seed\":{},\"width\":{},\"height\":{},\"loras\":[{}]{}{}{}{}}}",
         json_string(p.prompt), p.negative ? json_string(*p.negative) : "null", json_string(p.model), p.steps,
         p.guidance, json_string(p.sampler), p.seed, p.width, p.height, loras,
         skip.empty() ? "" : std::format(",\"skip_blocks\":[{}]", skip),
-        p.strength ? std::format(",\"strength\":{:g}", *p.strength) : "");
+        p.strength ? std::format(",\"strength\":{:g}", *p.strength) : "",
+        p.color_end ? std::format(",\"control_color_end\":{:g}", *p.color_end) : "",
+        p.depth_end ? std::format(",\"control_depth_end\":{:g}", *p.depth_end) : "");
     std::vector<uint8_t> chunks = itxt("parameters", params);
     const auto m = itxt("mako", json);
     chunks.insert(chunks.end(), m.begin(), m.end());

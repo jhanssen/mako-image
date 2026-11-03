@@ -233,6 +233,8 @@ std::unique_ptr<Engine> Engine::open(const std::string& dir, mtl::Context& ctx, 
         return std::make_unique<MossImage>(dir, ctx, opts);
     if (!opts.adapter.empty())
         throw std::runtime_error(std::format("{}: adapters are for MOSS-Image", dir));
+    if (!opts.control.empty())
+        throw std::runtime_error(std::format("{}: control adapters are for MOSS-Image", dir));
     throw std::runtime_error(std::format("{}: an image model mako does not know ({})", dir, cls.empty() ? "?" : cls));
 }
 
@@ -479,6 +481,8 @@ std::vector<float> Engine::generate(const Request& r)
     if (!r.image.empty() && (r.image.size() != uint64_t(r.width) * r.height * 4 || !(r.strength > 0) ||
                              r.strength > 1))
         throw std::runtime_error("image to image: an RGBA image of the output's size, and a strength in (0, 1]");
+    if ((!r.control.color.empty() || !r.control.depth.empty()) && !has_control())
+        throw std::runtime_error(std::format("{}: no control adapter for the maps", name()));
     const Sampler sampler = r.sampler.value_or(default_sampler());
     if (sampler == Sampler::euler_ancestral && !predicts_noise())
         throw std::runtime_error(std::format("{}: Euler a needs a model that predicts the noise", name()));
@@ -529,6 +533,16 @@ std::vector<float> Engine::generate(const Request& r)
             x[j] = predicts_noise() ? z[j] + s0 * x[j] : (1 - s0) * z[j] + s0 * x[j];
     }
     const uint32_t steps = uint32_t(sig.size() - 1);
+    if (has_control()) {
+        auto map = [&](std::span<const float> m) {
+            if (m.empty())
+                return std::vector<float>{};
+            if (m.size() != uint64_t(r.width) * r.height * 4)
+                throw std::runtime_error("control: maps must be RGBA of the output's size");
+            return encode(m, h, w);
+        };
+        set_control(map(r.control.color), map(r.control.depth));
+    }
     // Noise at the schedule's top level, as the reference scales it there: sqrt(1 + sigma^2) (the image's own unit
     // variance with the noise's).
     if (predicts_noise() && r.image.empty()) {
@@ -550,6 +564,8 @@ std::vector<float> Engine::generate(const Request& r)
     }
     for (uint32_t i = 0; i < steps; ++i) {
         const float s = er ? er->sigma(i) : sig[i];
+        if (has_control())
+            control_on(float(i) < r.control.color_end * float(steps), float(i) < r.control.depth_end * float(steps));
         auto v = step(x, s);
         if (negative) {
             const auto neg = step(x, s, 1);
@@ -585,6 +601,13 @@ std::vector<float> Engine::generate(const Request& r)
     return decode(x, h, w);
 }
 
+void Engine::set_control(std::vector<float>, std::vector<float>)
+{
+    throw std::runtime_error(std::format("{}: takes no control adapter", name()));
+}
+
+void Engine::control_on(bool, bool) {}
+
 uint32_t Engine::start_step(uint32_t steps, float strength)
 {
     // Below 1, at least the first step is left out: from the top level (pure noise) the image would be lost.
@@ -600,6 +623,10 @@ Provenance Engine::provenance(const Request& r) const
     p.height = r.height;
     p.seed = r.seed;
     p.steps = r.steps ? r.steps : default_steps();
+    if (!r.control.color.empty())
+        p.color_end = r.control.color_end;
+    if (!r.control.depth.empty())
+        p.depth_end = r.control.depth_end;
     if (!r.image.empty()) {
         // The share of the steps run, which the strength rounds to.
         const uint32_t all = uint32_t(sigmas(p.steps, (r.width / 16) * (r.height / 16), r.terminal).size() - 1);
@@ -1514,6 +1541,10 @@ uint32_t Engine::add_lora(const std::string& path, float scale, std::optional<bo
     auto file = safetensors::File::open(path);
     if (!file)
         throw std::runtime_error(file.error());
+    if (const auto it = file->metadata().find("hayate_control");
+        !control_lora_ && it != file->metadata().end() && it->second == "1")
+        throw std::runtime_error(std::format("{}: a control adapter, not a LoRA (the model directory's \"control\")",
+                                             path));
     // The adapter's alpha for every matrix, from a PEFT config in the metadata.
     std::optional<double> alpha;
     if (const auto it = file->metadata().find("lora_adapter_metadata"); it != file->metadata().end()) {
@@ -1539,6 +1570,8 @@ uint32_t Engine::add_lora(const std::string& path, float scale, std::optional<bo
                               "lora_unet_"})
             if (name.starts_with(p))
                 name.remove_prefix(std::strlen(p));
+        if (control_lora_ && name.starts_with("video_embedder."))
+            continue; // the control adapter's input projection, which the model reads itself
         if (name.ends_with(".diff_b")) {
             bias_diffs[std::string(name.substr(0, name.size() - 7))] = &t;
             continue;

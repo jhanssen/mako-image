@@ -50,6 +50,10 @@ came out a few percent off.
   the same parts down: stride-2 convolutions padded only below and right, the posterior's mean packed and normalized
   as the decoder's input. Image to image runs the schedule's last `strength` share of steps from the image noised to
   the first of them, (1 - sigma) image + sigma noise.
+- Control adapter (`Options::control`): its `video_embedder` (3072 x 384) replaces the image input, each token's row
+  [latents | colour map latents | depth map latents] (the maps through the VAE encoder, zeros when not given or past
+  their end), and its LoRA adds to the blocks (unmerged) and the text refiner's blocks (merged: its changes are 3-8%
+  of the weights, BF16 rounding loses 2-5% of them). Both passes of guidance see the maps.
 - Schedule: shift 5 on a linear grid, snapped to the 1000 training levels; 50 steps. Guidance 3 always, against an
   empty negative prompt unless one is given, that pass skipping block 22, as the reference runs it (other blocks:
   `skip_blocks`).
