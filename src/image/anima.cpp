@@ -30,8 +30,6 @@ struct AttnArgs {
     float scale;
 };
 
-uint32_t round_up(uint32_t x, uint32_t m) { return (x + m - 1) / m * m; }
-
 safetensors::Files open_files(const std::string& path)
 {
     auto f = safetensors::Files::open(path);

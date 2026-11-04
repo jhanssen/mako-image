@@ -32,7 +32,7 @@ add_library(mako_imagegen STATIC ${S}/image/conv.cpp ${S}/image/engine.cpp ${S}/
             ${S}/image/moss_image.cpp ${S}/image/anima.cpp ${S}/image/sdxl.cpp ${S}/image/clip_tokenizer.cpp ${S}/image/er_sde.cpp
             ${S}/image/png.cpp)
 target_include_directories(mako_imagegen PUBLIC ${S})
-target_link_libraries(mako_imagegen PUBLIC mako_gpu mako_safetensors mako_text mako_log
+target_link_libraries(mako_imagegen PUBLIC mako_gpu mako_models mako_safetensors mako_text mako_log
                       PRIVATE glaze_headers "-framework ImageIO" "-framework CoreGraphics" "-framework CoreFoundation")
 
 add_library(mako_image_server STATIC ${S}/server/image_models.cpp ${S}/server/image_server.cpp)

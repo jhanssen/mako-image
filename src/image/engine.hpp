@@ -2,6 +2,7 @@
 
 #include "image/conv.hpp"
 #include "image/png.hpp"
+#include "models/qwen_text.hpp"
 #include "safetensors/safetensors.hpp"
 #include "text/tokenizer.hpp"
 
@@ -76,7 +77,7 @@ public:
         std::string text_encoder, vae, scheduler, tokenizer;
         float text_theta = 0;
     };
-    virtual const char* name() const = 0;
+    const char* name() const override = 0;
     virtual uint32_t default_steps() const = 0;
     // The guidance scale with a negative prompt: the step's velocity is neg + scale * (pos - neg).
     virtual float default_guidance() const = 0;
@@ -139,7 +140,7 @@ public:
     // [n - drop][taps][E].
     std::vector<float> encode_text(std::span<const int32_t> ids, uint32_t drop, std::span<const uint32_t> taps = {},
                                    bool normed = false);
-    uint32_t text_width() const { return tE_; }
+    uint32_t text_width() const { return text_->width(); }
 
     // The VAE decoder: transformer latents [h * w][latent_width()] (normalized) to RGBA [16h][16w][4] in [-1, 1].
     std::vector<float> decode(std::span<const float> latents, uint32_t h, uint32_t w);
@@ -158,16 +159,9 @@ public:
     // place of 1.
     virtual float top_sigma(uint32_t tokens) const;
 
-    // Adds a LoRA to the transformer for good: W += scale * (alpha / rank) * B A for each matrix it adapts, merged
-    // (rounded back to the weights' BF16) or, where the model can (keeps_loras_unmerged()), kept beside the weight and
-    // applied on every pass; b += scale * diff_b for whole bias differences. merge unset: the model's way (unmerged
-    // where it can). Keys as Diffusers, PEFT or ComfyUI name them, or Kohya's (lora_unet_ and the module path with
-    // underscores); alpha from the adapter's .alpha tensors, else its PEFT config in the metadata, else the rank.
-    // Returns the tensors adapted; throws on a file it cannot use (keys it does not know are an error).
-    uint32_t add_lora(const std::string& path, float scale = 1.0f, std::optional<bool> merge = std::nullopt);
+    // A LoRA added for good (models::TransformerRuntime::add_lora); keeps_loras_unmerged() is the family's.
+    using TransformerRuntime::add_lora;
     uint32_t add_lora(const Lora& l) { return add_lora(l.path, l.scale, l.merge); }
-    // Whether LoRAs can stay unmerged (Lora::merge false): the family's (keeps_loras_unmerged(family)).
-    virtual bool keeps_loras_unmerged() const { return false; }
     // Whether a control adapter is loaded (Options::control).
     virtual bool has_control() const { return false; }
     const text::Tokenizer& tokenizer() const { return *tok_; }
@@ -177,8 +171,6 @@ protected:
     // the next steps see.
     virtual void set_control(std::vector<float> color, std::vector<float> depth);
     virtual void control_on(bool color, bool depth);
-    // Set while a control adapter's LoRA is added: its input projection's tensors are the model's to read.
-    bool control_lora_ = false;
     // Which blocks the negative prompt's pass leaves out from here on; throws on blocks the model does not have, or
     // any for a model that skips none.
     virtual void set_skip_blocks(std::span<const uint32_t> blocks);
@@ -197,26 +189,8 @@ protected:
     void group_norm(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, const Tensor& g, const Tensor& b, MTL::Buffer* y,
                     uint32_t rows, uint32_t c, bool silu, float eps = 1e-6f);
 
-    // The weight a LoRA module adapts: its matrix and the rows it has there (fused matrices share one).
-    struct LoraTarget {
-        Tensor* w = nullptr;
-        uint32_t row0 = 0, rows = 0;
-    };
-    // `module` with the file's prefixes stripped (transformer., diffusion_model., ...).
-    virtual LoraTarget lora_target(const std::string& module) = 0;
-    // The F32 bias of `module`, for an adapter's whole bias difference (null: none).
-    virtual Tensor* lora_bias(const std::string&) { return nullptr; }
-    // A small matrix of `module` the model keeps on the CPU, [rows][cols] floats (null: none).
-    virtual float* lora_cpu(const std::string&, uint32_t& /*rows*/, uint32_t& /*cols*/) { return nullptr; }
-    // After a LoRA is merged (what the model computed from the weights before is stale).
-    virtual void lora_merged() {}
-    // Keeps W += s * B A for `module` unmerged, applied beside W on every pass (a: [rank][k], b: [rows][rank]); false:
-    // merge it. For changes smaller than the weights' rounding, which merging into them would lose.
-    virtual bool lora_side(const std::string& /*module*/, std::span<const float> /*a*/, std::span<const float> /*b*/,
-                           uint32_t /*rank*/, float /*s*/)
-    {
-        return false;
-    }
+    // Which matrix a LoRA module adapts (models::TransformerRuntime): every family names its own.
+    LoraTarget lora_target(const std::string& module) override = 0;
     // A data-space sampler (an adapter's): each step runs the model on z + Q x0 at the next code's timestep and takes
     // x0 = z - its output, from one fixed noise z and x0 = 0; no guidance.
     struct DataSpace {
@@ -225,31 +199,7 @@ protected:
     };
     virtual const DataSpace* data_space() const { return nullptr; }
 
-    Tensor upload(const safetensors::Files& files, const std::string& name, bool matrix);
-    // A tensor's values as F32 (from F32, F16 or BF16).
-    Tensor upload_f32(const safetensors::Files& files, const std::string& name);
-    // BF16 (or F32, rounded to BF16) matrices of one width, their rows one after another in one tensor; F16 ones stay
-    // F16.
-    Tensor upload_rows(const safetensors::Files& files, std::span<const std::string> names);
-    // An RMS norm's scale stored zero-centred: weight + 1, as floats.
-    Tensor upload_plus_one(const safetensors::Files& files, const std::string& name);
-    void add(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, MTL::Buffer* z, MTL::Buffer* y, uint32_t n);
-    // Per-head q / k / v half tiles of T rows (rope: 0 none, 1 halves, 2 adjacent pairs; cs: the angle table).
-    void heads(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, uint32_t ld, uint32_t col0, uint32_t heads,
-               uint32_t T, uint32_t n_pad, MTL::Buffer* cs, uint32_t rope, MTL::Buffer* y);
-    // heads() with each head RMS-normed first (times w).
-    void heads_norm(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, uint32_t ld, uint32_t col0, uint32_t heads,
-                    uint32_t T, uint32_t n_pad, MTL::Buffer* cs, uint64_t cs_off, uint32_t rope, const Tensor& w,
-                    float eps, uint32_t row0, MTL::Buffer* y);
-    // block: positions from here on see each other both ways; below it, causal (0: all both ways).
-    void attention(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* q, MTL::Buffer* k, MTL::Buffer* v, MTL::Buffer* o,
-                   uint32_t n_q, uint32_t q_pad, uint32_t n_k, uint32_t k_pad, uint32_t heads, uint32_t kv_heads,
-                   uint32_t q_pos0, uint32_t block);
-    void unary(MTL::ComputeCommandEncoder*& enc, const char* fn, MTL::Buffer* x, uint32_t n);
-
-    static constexpr uint32_t kHeadDim = 128;
-    static constexpr uint32_t kAttnRows = 64; // queries a threadgroup of the attention kernel
-    static constexpr uint32_t kLatent = 64;   // a transformer token's latent values (the Qwen-Image VAEs')
+    static constexpr uint32_t kLatent = 64; // a transformer token's latent values (the Qwen-Image VAEs')
 
     std::optional<text::Tokenizer> tok_;
     uint32_t lat_ = kLatent;
@@ -261,21 +211,8 @@ protected:
     std::string dir_;
 
 private:
-    struct TextLayer {
-        Tensor attn_norm, q, k, v, o, q_norm, k_norm, ffn_norm, gate, up, down;
-        // A gated delta rule layer (Qwen3.5's linear attention): q | k | v in one matrix (q), its causal convolution,
-        // the output gate z, b | a for the update and decay, the decay's parameters; o its output, q_norm the gated
-        // norm's scale.
-        bool linear = false;
-        Tensor conv, z, ba, a_log, dt_bias;
-    };
-    void load_text(const std::string& tdir);
-    // A gated delta rule layer and a gated attention layer (Qwen3.5) from xn, into y.
-    void text_linear(MTL::ComputeCommandEncoder*& enc, const TextLayer& L, MTL::Buffer* xn, MTL::Buffer* y, uint32_t T);
-    void text_gated_attention(MTL::ComputeCommandEncoder*& enc, const TextLayer& L, MTL::Buffer* xn, MTL::Buffer* y,
-                              uint32_t T, MTL::Buffer* cs);
-    // Rows of the token embedding table (BF16, read from the file).
-    void embed(std::span<const int32_t> ids, float* out) const;
+    // The text encoder, with its weights in its own runtime.
+    std::unique_ptr<models::QwenText> text_;
 
     struct Res {
         Tensor g1, g2; // the norms' scales (and with group norms, b1, b2 their biases)
@@ -321,16 +258,7 @@ private:
     void norm_silu(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, const Tensor& g, MTL::Buffer* y, uint32_t rows,
                    uint32_t c, const Tensor* b = nullptr);
 
-    safetensors::Files text_files_, vae_files_;
-    safetensors::Files::Ref embd_;
-    std::vector<TextLayer> text_;
-    Tensor text_norm_;
-    uint32_t tE_ = 0, tHeads_ = 0, tKv_ = 0;
-    float tEps_ = 1e-6f, tTheta_ = 5e6f;
-    // Qwen3.5: zero-centred norms, attention heads tHead_ wide with an output gate and the first tRot_ values rotated,
-    // and the delta rule's key and value heads (of 128).
-    bool qwen35_ = false;
-    uint32_t tHead_ = kHeadDim, tRot_ = kHeadDim, tKeyHeads_ = 0, tValueHeads_ = 0;
+    safetensors::Files vae_files_;
 
     Conv post_quant_, conv_in_, conv_out_, qkv_, attn_proj_;
     Tensor attn_g_, out_g_, attn_b_, out_b_;

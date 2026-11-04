@@ -41,8 +41,6 @@ constexpr const char* kClipL = "conditioner.embedders.0.transformer.text_model."
 constexpr const char* kClipG = "conditioner.embedders.1.model.";
 constexpr float kLatentScale = 0.13025f;
 
-uint32_t round_up(uint32_t x, uint32_t m) { return (x + m - 1) / m * m; }
-
 // The empty prompt's chunk: start, end, then padding.
 std::vector<int32_t> empty_ids(int32_t pad)
 {

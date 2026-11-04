@@ -14,51 +14,7 @@ struct Im2colArgs {
     uint32_t h, w, c, p0, rows, kpad;
 };
 
-uint32_t round_up(uint32_t x, uint32_t m) { return (x + m - 1) / m * m; }
-
 } // namespace
-
-std::vector<float> read_floats(const safetensors::File& f, const gguf::Tensor& t)
-{
-    const uint64_t n = t.elements();
-    std::vector<float> out(n);
-    std::vector<std::byte> raw(t.bytes);
-    gguf::read_exact(f.fd(), raw.data(), t.bytes, t.offset);
-    for (uint64_t i = 0; i < n; ++i) {
-        if (t.type == gguf::Type::F32) {
-            std::memcpy(&out[i], raw.data() + i * 4, 4);
-        } else if (t.type == gguf::Type::F16) {
-            __fp16 h;
-            std::memcpy(&h, raw.data() + i * 2, 2);
-            out[i] = float(h);
-        } else {
-            uint16_t b;
-            std::memcpy(&b, raw.data() + i * 2, 2);
-            const uint32_t u = uint32_t(b) << 16;
-            std::memcpy(&out[i], &u, 4);
-        }
-    }
-    return out;
-}
-
-std::vector<float> ConvRuntime::floats(const safetensors::Files& files, const std::string& name)
-{
-    const auto r = files.find(name);
-    if (!r)
-        throw std::runtime_error("missing tensor " + name);
-    return read_floats(*r.file, *r.tensor);
-}
-
-void ConvRuntime::bias(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* y, const Tensor& b, uint32_t n, uint32_t rows,
-                       uint64_t y_off)
-{
-    enc->setComputePipelineState(pso("bias_rows"));
-    enc->setBuffer(y, y_off, 0);
-    enc->setBuffer(b.buf, b.off, 1);
-    enc->setBytes(&n, sizeof(n), 2);
-    enc->dispatchThreads(MTL::Size(n, rows, 1), MTL::Size(64, 1, 1));
-    after(enc, "bias_rows");
-}
 
 ConvRuntime::Conv ConvRuntime::load_conv(const safetensors::Files& files, std::span<const std::string> names,
                                          uint32_t k)
