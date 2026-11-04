@@ -292,8 +292,9 @@ void ImageServer::Impl::upscaler_list(httplib::Response& res)
 {
     std::string data;
     for (const auto& c : upscaler_choices(opts.upscalers))
-        data += std::format(R"({}{{"name":{},"factor":{},"blocks":{}}})", data.empty() ? "" : ",", json_quoted(c.name),
-                            c.factor, c.blocks);
+        data += std::format(R"({}{{"name":{},"factor":{},"blocks":{}{}}})", data.empty() ? "" : ",",
+                            json_quoted(c.name), c.factor, c.blocks,
+                            c.description.empty() ? "" : std::format(R"(,"description":{})", json_quoted(c.description)));
     res.set_content(std::format(R"({{"object":"list","data":[{}]}})", data), "application/json");
 }
 

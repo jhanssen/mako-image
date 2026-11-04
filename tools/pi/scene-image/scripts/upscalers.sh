@@ -1,6 +1,7 @@
 #!/bin/sh
 # Lists the ESRGAN upscalers mako_image_serve can run (GET /v1/images/upscalers): a name per line with what it
-# multiplies a side by and its blocks. render.sh --upscale NAME[:SCALE] uses one.
+# multiplies a side by and its blocks, then what it is for where the server knows. render.sh --upscale NAME[:SCALE]
+# uses one.
 # MAKO_IMAGE_URL (default http://127.0.0.1:8082/v1), MAKO_IMAGE_API_KEY (when the server wants one).
 set -eu
 url=${MAKO_IMAGE_URL:-http://127.0.0.1:8082/v1}
@@ -20,4 +21,6 @@ if not d["data"]:
     print("no upscalers (mako_image_serve --upscalers DIR)")
 for u in d["data"]:
     print(f"{u['name']}  {u['factor']}x, {u['blocks']} blocks")
+    if "description" in u:
+        print(f"    {u['description']}")
 PY

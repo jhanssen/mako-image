@@ -253,9 +253,10 @@ uses unless told otherwise, at the scale shown.
   adapter (see "Layouts"; a draft's `color_map` / `depth_map` are passed by themselves).
 - `--layout DRAFT`: a MOSS-Image layout in place of size and prompt (see "Layouts").
 - `--upscale NAME[:SCALE]`: after the render, the server's ESRGAN upscaler NAME (`scripts/upscalers.sh` lists them,
-  with what each multiplies a side by) enlarges the image to SCALE times the size (default: the upscaler's own, 4 for
-  most; less is resampled down from its output). Use it when the user asks for a larger or sharper image; it adds
-  a few seconds. The upscalers tried are for drawn and anime-style images; none changes the style.
+  with what each multiplies a side by and what it is for) enlarges the image to SCALE times the size (default: the
+  upscaler's own, 4 for most; less is resampled down from its output). Use it when the user asks for a larger or
+  sharper image; it adds about a second. Pick by the list's notes: drawn and anime images take an anime or general
+  upscaler, photographs a photographic one (an anime upscaler paints a photograph flat). None changes the style.
 
 The environment, set by the user: `MAKO_IMAGE_URL` and `MAKO_IMAGE_API_KEY` (the server), `MAKO_IMAGE_DIR` (where
 images are saved, default `~/Pictures/mako`), `MAKO_IMAGE_OPEN=0` (do not open the image viewer), `MAKO_TAGS_CSV`

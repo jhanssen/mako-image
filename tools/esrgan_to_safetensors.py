@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Converts an ESRGAN upscaler's PyTorch checkpoint (.pth) to safetensors for mako_upscale and mako_image_serve.
+"""Converts an ESRGAN upscaler's checkpoint (.pth, or a .safetensors in the original ESRGAN's names) to the
+safetensors mako_upscale and mako_image_serve take.
 
-usage: esrgan_to_safetensors.py MODEL.pth [OUT.safetensors]
+usage: esrgan_to_safetensors.py MODEL.pth|MODEL.safetensors [OUT.safetensors]
 
 Reads torch's zip and legacy pickle formats without torch (the tensors' bytes are copied as they are; F64 becomes F32)
 and names the layers as Real-ESRGAN does (conv_first, body.N.rdbM.convK, conv_body, conv_upN, conv_hr, conv_last),
 renaming the original ESRGAN's model.N.sub.M layers. A state dict under "params_ema" or "params" is unwrapped. The
-output defaults to the input's name with .safetensors.
+output defaults to the input's name with .safetensors (a safetensors input needs an output name).
 """
 import array
 import collections
@@ -98,6 +99,35 @@ def load_legacy(path):
     return obj, lambda key: data[key]
 
 
+def load_safetensors(path):
+    """A safetensors file: its tensors as records over the file's bytes."""
+    with open(path, "rb") as f:
+        (n,) = struct.unpack("<Q", f.read(8))
+        header = json.loads(f.read(n))
+        data = f.read()
+    sizes = {"F32": 4, "F16": 2, "BF16": 2, "F64": 8}
+    obj = collections.OrderedDict()
+    for name, t in header.items():
+        if name == "__metadata__":
+            continue
+        if t["dtype"] not in sizes:
+            fail(f"{name}: {t['dtype']} tensors are not supported")
+        storage = {"F32": "FloatStorage", "F16": "HalfStorage", "BF16": "BFloat16Storage", "F64": "DoubleStorage"}[t["dtype"]]
+        numel = 1
+        for d in t["shape"]:
+            numel *= d
+        stride, acc = [], 1
+        for d in reversed(t["shape"]):
+            stride.insert(0, acc)
+            acc *= d
+        obj[name] = Tensor((storage, name, numel), 0, t["shape"], stride)
+    a, b = {}, {}
+    for name, t in header.items():
+        if name != "__metadata__":
+            a[name], b[name] = t["data_offsets"]
+    return obj, lambda key: data[a[key]:b[key]]
+
+
 def state_dict(obj):
     for key in ("params_ema", "params"):
         if isinstance(obj, dict) and key in obj and isinstance(obj[key], dict):
@@ -140,7 +170,11 @@ def main():
         sys.exit(2)
     src = sys.argv[1]
     dst = sys.argv[2] if len(sys.argv) == 3 else os.path.splitext(src)[0] + ".safetensors"
-    if zipfile.is_zipfile(src):
+    if src.endswith(".safetensors"):
+        if len(sys.argv) != 3:
+            fail("a safetensors input needs an output name")
+        obj, read = load_safetensors(src)
+    elif zipfile.is_zipfile(src):
         obj, read = load_zip(src)
     else:
         obj, read = load_legacy(src)

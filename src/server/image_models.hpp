@@ -68,9 +68,9 @@ LoraNotes lora_notes(const std::string& path);
 image::Loras resolve_loras(std::string_view json, const std::vector<LoraChoice>& choices);
 
 // An ESRGAN upscaler a request can name: its file name without .safetensors, its path, what it multiplies a side by
-// and its blocks (from the file's header).
+// and its blocks (from the file's header), and what it is for, from NAME.json beside it ({"description": "..."}).
 struct UpscalerChoice {
-    std::string name, path;
+    std::string name, path, description;
     uint32_t factor = 1, blocks = 0;
 };
 // The .safetensors files in `dir` by name (read now; empty: none); ones that are not ESRGAN upscalers in

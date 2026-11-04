@@ -169,11 +169,17 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   steps before its end (the share run, default 1). The maps go through the VAE encoder; the adapter widens the image
   input to [latents | colour | depth] and brings a LoRA (its blocks' part kept unmerged, its text refiner's merged).
   With the 8-step DMD LoRA an end of 0.25 kept poses and placement without the map's shapes showing in the bodies.
-- Upscaling with ESRGAN models (the original's and Real-ESRGAN's RRDBNet: 4x-UltraSharp, 4x-AnimeSharp,
-  RealESRGAN_x4plus_anime_6B tried) from `--upscalers DIR` (default: `--image-models`' `upscalers/`), `NAME.safetensors`
-  each, converted from the .pth checkpoints by `tools/esrgan_to_safetensors.py MODEL.pth [OUT.safetensors]` (no torch
-  needed; the original ESRGAN's layer names become Real-ESRGAN's). `GET /v1/images/upscalers` lists them (`name`,
-  `factor`, `blocks`). `POST /v1/images/upscales` with `image` (base64 or a `data:` URL, at most 2048x2048 pixels'
+- Upscaling with ESRGAN models (the original's and Real-ESRGAN's RRDBNet; other architectures such as DAT, HAT,
+  SPAN or SwinIR are not read) from `--upscalers DIR` (default: `--image-models`' `upscalers/`), `NAME.safetensors`
+  each, converted from the .pth checkpoints (or a safetensors in the original names) by
+  `tools/esrgan_to_safetensors.py MODEL.pth [OUT.safetensors]` (no torch needed; the original ESRGAN's layer names
+  become Real-ESRGAN's), with an optional `NAME.json` beside it (`{"description": "..."}`, what it is for).
+  `GET /v1/images/upscalers` lists them (`name`, `factor`, `blocks`, `description`). Tried, on a cartoon render and a
+  Krea photograph at 4x: for drawn images 4x-AnimeSharp (clean edges) and 4x-UltraSharp (keeps texture),
+  RealESRGAN_x4plus_anime_6B flattening fills; for photographs 4x_foolhardy_Remacri and 4x_NMKD-Siax_200k (skin
+  texture and bokeh kept), 4x-UltraSharp close behind, while 4x_NMKD-Superscale amplifies grain everywhere,
+  4xNomos8kSC streaks the bokeh, RealESRGAN_x4plus and 4x_RealisticRescaler smooth skin, and the anime models paint
+  photographs flat. None changes the style: a drawn image stays drawn. `POST /v1/images/upscales` with `image` (base64 or a `data:` URL, at most 2048x2048 pixels'
   area), `model` (default: the first by name), `scale` (1 to the upscaler's factor, default the factor; less is
   resampled down from its output with Lanczos) and `output_format` answers like a generation, `size` the result's
   (no provenance chunks). A generation's `upscale` (a name, or `{"model": NAME, "scale": F}`) upscales its images

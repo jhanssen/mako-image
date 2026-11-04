@@ -318,11 +318,21 @@ std::vector<UpscalerChoice> upscaler_choices(const std::string& dir)
                       f.filename().string());
             continue;
         }
-        UpscalerChoice c{f.stem().string(), f.string()};
+        UpscalerChoice c;
+        c.name = f.stem().string();
+        c.path = f.string();
         while (file->tensor(std::format("body.{}.rdb1.conv1.weight", c.blocks)))
             ++c.blocks;
         for (uint32_t i = 1; file->tensor(std::format("conv_up{}.weight", i)); ++i)
             c.factor *= 2;
+        if (std::ifstream in(fs::path(f).replace_extension(".json")); in) {
+            const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            glz::generic v;
+            if (glz::read_json(v, text) || !v.is_object())
+                log::warn("{}: not a JSON object; its notes left out", fs::path(f).replace_extension(".json").string());
+            else if (v.contains("description") && v["description"].is_string())
+                c.description = v["description"].get_string();
+        }
         out.push_back(std::move(c));
     }
     return out;
