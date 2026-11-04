@@ -8,7 +8,10 @@
 #include <cstring>
 #include <format>
 #include <fstream>
+#include <functional>
+#include <numbers>
 #include <stdexcept>
+#include <thread>
 
 namespace mako::image {
 
@@ -102,6 +105,8 @@ std::vector<uint8_t> with_provenance(std::vector<uint8_t> png, const Provenance&
         params += std::format(", Control color end: {:g}", *p.color_end);
     if (p.depth_end)
         params += std::format(", Control depth end: {:g}", *p.depth_end);
+    if (p.upscale)
+        params += std::format(", Hires upscale: {:g}, Hires upscaler: {}", p.upscale->scale, p.upscale->model);
     std::string loras;
     for (const auto& l : p.loras)
         loras += std::format("{}{{\"name\":{},\"scale\":{:g}{}}}", loras.empty() ? "" : ",", json_string(l.name),
@@ -117,13 +122,16 @@ std::vector<uint8_t> with_provenance(std::vector<uint8_t> png, const Provenance&
         skip += std::format("{}{}", skip.empty() ? "" : ",", b);
     const std::string json = std::format(
         "{{\"prompt\":{},\"negative_prompt\":{},\"model\":{},\"steps\":{},\"guidance\":{:g},\"sampler\":{},"
-        "\"seed\":{},\"width\":{},\"height\":{},\"loras\":[{}]{}{}{}{}}}",
+        "\"seed\":{},\"width\":{},\"height\":{},\"loras\":[{}]{}{}{}{}{}}}",
         json_string(p.prompt), p.negative ? json_string(*p.negative) : "null", json_string(p.model), p.steps,
         p.guidance, json_string(p.sampler), p.seed, p.width, p.height, loras,
         skip.empty() ? "" : std::format(",\"skip_blocks\":[{}]", skip),
         p.strength ? std::format(",\"strength\":{:g}", *p.strength) : "",
         p.color_end ? std::format(",\"control_color_end\":{:g}", *p.color_end) : "",
-        p.depth_end ? std::format(",\"control_depth_end\":{:g}", *p.depth_end) : "");
+        p.depth_end ? std::format(",\"control_depth_end\":{:g}", *p.depth_end) : "",
+        p.upscale ? std::format(",\"upscale\":{{\"model\":{},\"scale\":{:g}}}", json_string(p.upscale->model),
+                                p.upscale->scale)
+                  : "");
     std::vector<uint8_t> chunks = itxt("parameters", params);
     const auto m = itxt("mako", json);
     chunks.insert(chunks.end(), m.begin(), m.end());
@@ -232,6 +240,93 @@ std::vector<float> decode_image(std::span<const uint8_t> data, uint32_t width, u
     std::vector<float> out(px.size());
     for (size_t i = 0; i < px.size(); ++i)
         out[i] = i % 4 == 3 ? 1.0f : px[i] / 127.5f - 1.0f;
+    return out;
+}
+
+namespace {
+
+// One output position's taps along a source axis: the first source index and the weights (summing to 1).
+struct Taps {
+    uint32_t i0 = 0;
+    std::vector<float> w;
+};
+
+// Lanczos (3 lobes) taps of each of `dst` output positions over `src` source ones, the filter widened by the ratio
+// when shrinking.
+std::vector<Taps> lanczos_taps(uint32_t src, uint32_t dst)
+{
+    const double scale = double(src) / dst, widen = std::max(scale, 1.0), support = 3.0 * widen;
+    std::vector<Taps> out(dst);
+    for (uint32_t o = 0; o < dst; ++o) {
+        const double centre = (o + 0.5) * scale;
+        const int i0 = std::max(0, int(std::floor(centre - support + 0.5)));
+        const int i1 = std::min(int(src), int(std::floor(centre + support + 0.5)));
+        Taps& t = out[o];
+        t.i0 = uint32_t(i0);
+        t.w.resize(size_t(std::max(0, i1 - i0)));
+        double sum = 0;
+        for (int i = i0; i < i1; ++i) {
+            const double x = (i + 0.5 - centre) / widen;
+            double v = 0;
+            if (x == 0)
+                v = 1;
+            else if (std::abs(x) < 3)
+                v = 3 * std::sin(std::numbers::pi * x) * std::sin(std::numbers::pi * x / 3) /
+                    (std::numbers::pi * std::numbers::pi * x * x);
+            t.w[size_t(i - i0)] = float(v);
+            sum += v;
+        }
+        for (float& v : t.w)
+            v = float(v / sum);
+    }
+    return out;
+}
+
+// Rows [0, rows) split over the hardware's threads.
+void over_rows(uint32_t rows, const std::function<void(uint32_t, uint32_t)>& f)
+{
+    const uint32_t n = std::min(rows, std::max(1u, std::thread::hardware_concurrency()));
+    std::vector<std::jthread> threads;
+    for (uint32_t t = 0; t < n; ++t)
+        threads.emplace_back([&, t] { f(rows * t / n, rows * (t + 1) / n); });
+}
+
+} // namespace
+
+std::vector<float> resize_image(std::span<const float> rgba, uint32_t w, uint32_t h, uint32_t W, uint32_t H)
+{
+    if (rgba.size() != uint64_t(w) * h * 4)
+        throw std::runtime_error("resize_image: the image must be RGBA [h][w][4]");
+    if (!W || !H)
+        throw std::runtime_error("resize_image: the size must be at least 1x1");
+    const auto xs = lanczos_taps(w, W), ys = lanczos_taps(h, H);
+    std::vector<float> mid(uint64_t(W) * h * 4); // resampled across
+    over_rows(h, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t y = y0; y < y1; ++y)
+            for (uint32_t x = 0; x < W; ++x) {
+                const Taps& t = xs[x];
+                float acc[4] = {0, 0, 0, 0};
+                for (size_t i = 0; i < t.w.size(); ++i)
+                    for (uint32_t ch = 0; ch < 4; ++ch)
+                        acc[ch] += t.w[i] * rgba[(uint64_t(y) * w + t.i0 + i) * 4 + ch];
+                for (uint32_t ch = 0; ch < 4; ++ch)
+                    mid[(uint64_t(y) * W + x) * 4 + ch] = acc[ch];
+            }
+    });
+    std::vector<float> out(uint64_t(W) * H * 4); // then down
+    over_rows(H, [&](uint32_t y0, uint32_t y1) {
+        for (uint32_t y = y0; y < y1; ++y) {
+            const Taps& t = ys[y];
+            for (uint32_t x = 0; x < W; ++x) {
+                float acc[4] = {0, 0, 0, 0};
+                for (size_t i = 0; i < t.w.size(); ++i)
+                    for (uint32_t ch = 0; ch < 4; ++ch)
+                        acc[ch] += t.w[i] * mid[(uint64_t(t.i0 + i) * W + x) * 4 + ch];
+                for (uint32_t ch = 0; ch < 4; ++ch)
+                    out[(uint64_t(y) * W + x) * 4 + ch] = acc[ch];
+            }
+        }
+    });
     return out;
 }
 

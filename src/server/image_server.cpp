@@ -15,6 +15,8 @@
 #include <cstdio>
 #include <filesystem>
 #include <format>
+#include <map>
+#include <mutex>
 #include <optional>
 #include <random>
 #include <span>
@@ -26,6 +28,8 @@ namespace mako::server {
 namespace {
 
 constexpr auto kProgressEvery = std::chrono::seconds(5);
+// The largest image upscaling makes (its pixels), and the largest it takes.
+constexpr double kMaxUpscaled = 4096.0 * 4096, kMaxUpscaleInput = 2048.0 * 2048;
 
 std::string json_quoted(std::string_view s)
 {
@@ -90,19 +94,208 @@ std::optional<std::vector<uint8_t>> unbase64(std::string_view s)
 } // namespace
 
 struct ImageServer::Impl {
-    Impl(ImageResidency& r, LoadImage l, ImageServerOptions o) : residency(r), load(std::move(l)), opts(std::move(o)) {}
+    Impl(ImageResidency& r, LoadImage l, ImageServerOptions o, LoadUpscaler u)
+        : residency(r), load(std::move(l)), opts(std::move(o)), load_upscaler(std::move(u))
+    {
+    }
     ImageResidency& residency;
     LoadImage load;
     ImageServerOptions opts;
+    LoadUpscaler load_upscaler;
     httplib::Server http;
     std::atomic<uint32_t> in_flight = 0, next_id = 0;
     std::atomic<int> port = 0;
+    // The upscalers loaded so far, by name (small: they stay), and one upscale at a time.
+    std::mutex upscale_mutex;
+    std::map<std::string, std::unique_ptr<image::Esrgan>> upscalers;
 
     void images(const httplib::Request& req, httplib::Response& res);
     void loras(const httplib::Request& req, httplib::Response& res);
     void image_model_list(httplib::Response& res);
     ImageModel image_model(const std::string& name) const;
+
+    // What a request asks to upscale with: the upscaler and the size multiple (0: the upscaler's own).
+    struct UpscaleAsk {
+        UpscalerChoice model;
+        float scale = 0;
+    };
+    // v: an upscaler's name, or an object with "model" (default: the first by name) and "scale" (strict: no other
+    // fields). Throws std::invalid_argument naming the problem.
+    UpscaleAsk upscale_ask(const glz::generic& v, bool strict) const;
+    // Why an image of w x h at the ask's scale cannot be made ("" when it can).
+    static std::string too_big(const UpscaleAsk& ask, uint32_t w, uint32_t h);
+    // RGBA [h][w][4] in [-1, 1] upscaled as asked, the upscaler loaded if need be: the image, its size and the scale in
+    // effect.
+    struct Upscaled {
+        std::vector<float> rgba;
+        uint32_t width = 0, height = 0;
+        float scale = 1;
+    };
+    Upscaled upscale(const UpscaleAsk& ask, std::span<const float> rgba, uint32_t w, uint32_t h);
+    void upscales(const httplib::Request& req, httplib::Response& res);
+    void upscaler_list(httplib::Response& res);
 };
+
+ImageServer::Impl::UpscaleAsk ImageServer::Impl::upscale_ask(const glz::generic& v, bool strict) const
+{
+    UpscaleAsk ask;
+    std::string name;
+    if (v.is_string()) {
+        name = v.get_string();
+    } else if (v.is_object()) {
+        if (strict)
+            for (const auto& [k, x] : v.get_object())
+                if (k != "model" && k != "scale")
+                    throw std::invalid_argument(std::format("unknown field {}", k));
+        if (v.contains("model") && !v["model"].is_null()) {
+            if (!v["model"].is_string())
+                throw std::invalid_argument("model must be a string");
+            name = v["model"].get_string();
+        }
+        if (v.contains("scale") && !v["scale"].is_null()) {
+            if (!v["scale"].is_number() || !(v["scale"].get_number() >= 1) || v["scale"].get_number() > 8)
+                throw std::invalid_argument("scale must be a number from 1 to 8");
+            ask.scale = float(v["scale"].get_number());
+        }
+    } else {
+        throw std::invalid_argument("an upscaler's name, or {\"model\": NAME, \"scale\": F}");
+    }
+    if (opts.upscalers.empty())
+        throw std::invalid_argument("this server has no upscalers (mako_image_serve --upscalers DIR)");
+    if (name.ends_with(".safetensors"))
+        name.resize(name.size() - std::string_view(".safetensors").size());
+    const auto list = upscaler_choices(opts.upscalers);
+    if (name.empty()) {
+        if (list.empty())
+            throw std::invalid_argument(std::format("no upscalers in {}", opts.upscalers));
+        ask.model = list.front();
+    } else {
+        const auto it = std::ranges::find(list, name, &UpscalerChoice::name);
+        if (it == list.end())
+            throw std::invalid_argument(
+                std::format("no upscaler named \"{}\" (GET /v1/images/upscalers lists them)", name));
+        ask.model = *it;
+    }
+    if (ask.scale > float(ask.model.factor))
+        throw std::invalid_argument(std::format("scale: {} goes up to {}x", ask.model.name, ask.model.factor));
+    return ask;
+}
+
+std::string ImageServer::Impl::too_big(const UpscaleAsk& ask, uint32_t w, uint32_t h)
+{
+    const double s = ask.scale ? ask.scale : ask.model.factor;
+    if (double(w) * h * s * s > kMaxUpscaled)
+        return std::format("{}x{} at {:g}x is past 4096x4096 pixels' area (a smaller scale)", w, h, s);
+    return {};
+}
+
+ImageServer::Impl::Upscaled ImageServer::Impl::upscale(const UpscaleAsk& ask, std::span<const float> rgba, uint32_t w,
+                                                       uint32_t h)
+{
+    std::lock_guard lock(upscale_mutex);
+    auto it = upscalers.find(ask.model.name);
+    if (it == upscalers.end() || it->second->path() != ask.model.path) {
+        if (!load_upscaler)
+            throw std::runtime_error("this server cannot load upscalers");
+        const auto t0 = std::chrono::steady_clock::now();
+        it = upscalers.insert_or_assign(ask.model.name, load_upscaler(ask.model.path)).first;
+        log::info("upscaler {} loaded in {:.1f} s", ask.model.name,
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    }
+    image::Esrgan& up = *it->second;
+    const uint32_t f = up.factor();
+    Upscaled o;
+    o.scale = ask.scale ? ask.scale : float(f);
+    o.width = uint32_t(std::lround(w * o.scale));
+    o.height = uint32_t(std::lround(h * o.scale));
+    o.rgba = up.upscale(rgba, w, h);
+    if (o.width != w * f || o.height != h * f)
+        o.rgba = image::resize_image(o.rgba, w * f, h * f, o.width, o.height);
+    return o;
+}
+
+void ImageServer::Impl::upscales(const httplib::Request& req, httplib::Response& res)
+{
+    auto fail = [&](int status, const std::string& message, const char* type) {
+        res.status = status;
+        res.set_content(error_body(message, type), "application/json");
+    };
+    glz::generic body;
+    if (glz::read_json(body, req.body) || !body.is_object())
+        return fail(400, "the body is not a JSON object", "invalid_request_error");
+    for (const auto& [k, v] : body.get_object())
+        if (k != "image" && k != "model" && k != "scale" && k != "output_format" && k != "response_format")
+            return fail(400, std::format("unknown field {}", k), "invalid_request_error");
+    if (!body.contains("image") || body["image"].is_null())
+        return fail(400, "image is required", "invalid_request_error");
+    const auto bytes = body["image"].is_string() ? unbase64(body["image"].get_string()) : std::nullopt;
+    if (!bytes || bytes->empty())
+        return fail(400, "image must be an image file in base64", "invalid_request_error");
+    if (body.contains("response_format") && body["response_format"].is_string() &&
+        body["response_format"].get_string() != "b64_json")
+        return fail(400, "response_format: only b64_json (images are not stored)", "invalid_request_error");
+    bool jpeg = false;
+    if (body.contains("output_format") && body["output_format"].is_string()) {
+        const std::string f = body["output_format"].get_string();
+        if (f != "png" && f != "jpeg")
+            return fail(400, "output_format: png or jpeg", "invalid_request_error");
+        jpeg = f == "jpeg";
+    }
+    UpscaleAsk ask;
+    try {
+        ask = upscale_ask(body, false);
+    } catch (const std::exception& e) {
+        return fail(400, e.what(), "invalid_request_error");
+    }
+    uint32_t width = 0, height = 0;
+    std::vector<float> rgba;
+    try {
+        std::tie(width, height) = image::image_size(*bytes);
+        if (double(width) * height > kMaxUpscaleInput)
+            return fail(400, std::format("image: {}x{} is past 2048x2048 pixels' area", width, height),
+                        "invalid_request_error");
+        rgba = image::decode_image(*bytes, width, height);
+    } catch (const std::exception& e) {
+        return fail(400, std::format("image: {}", e.what()), "invalid_request_error");
+    }
+    if (const std::string why = too_big(ask, width, height); !why.empty())
+        return fail(400, why, "invalid_request_error");
+    if (in_flight.fetch_add(1) > opts.max_waiting) {
+        --in_flight;
+        return fail(503, std::format("{} requests are already waiting", opts.max_waiting), "server_busy");
+    }
+    const auto slot = std::shared_ptr<void>(nullptr, [this](void*) { --in_flight; });
+    const std::string id = std::format("up-{}", next_id.fetch_add(1) + 1);
+    log::info("{}: upscale {}x{} with {}{}", id, width, height, ask.model.name,
+              ask.scale ? std::format(" to {:g}x", ask.scale) : "");
+    std::string data;
+    Upscaled u;
+    try {
+        const auto t0 = std::chrono::steady_clock::now();
+        u = upscale(ask, rgba, width, height);
+        const auto png = image::encode_png(image::to_rgba8(u.rgba), u.width, u.height, false, jpeg);
+        log::info("{}: {}x{} in {:.1f} s", id, u.width, u.height,
+                  std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        data = std::format(R"({{"b64_json":"{}"}})", base64(png));
+    } catch (const std::exception& e) {
+        log::error("{}: {}", id, e.what());
+        return fail(500, e.what(), "server_error");
+    }
+    const int64_t created =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    res.set_content(std::format(R"({{"created":{},"data":[{}],"output_format":"{}","size":"{}x{}"}})", created, data,
+                                jpeg ? "jpeg" : "png", u.width, u.height),
+                    "application/json");
+}
+
+void ImageServer::Impl::upscaler_list(httplib::Response& res)
+{
+    std::string data;
+    for (const auto& c : upscaler_choices(opts.upscalers))
+        data += std::format(R"({}{{"name":{},"factor":{},"blocks":{}}})", data.empty() ? "" : ",", json_quoted(c.name),
+                            c.factor, c.blocks);
+    res.set_content(std::format(R"({{"object":"list","data":[{}]}})", data), "application/json");
+}
 
 // Image prompts' text encoders and caches grow with the prompt.
 constexpr size_t kMaxImagePrompt = 16384;
@@ -143,6 +336,15 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
     if (body.contains("response_format") && body["response_format"].is_string() &&
         body["response_format"].get_string() != "b64_json")
         return fail(400, "response_format: only b64_json (images are not stored)", "invalid_request_error");
+    // Upscaled afterwards: an upscaler's name, or {"model": NAME, "scale": F} (the size checked once it is known).
+    std::optional<UpscaleAsk> up;
+    if (body.contains("upscale") && !body["upscale"].is_null()) {
+        try {
+            up = upscale_ask(body["upscale"], true);
+        } catch (const std::exception& e) {
+            return fail(400, std::format("upscale: {}", e.what()), "invalid_request_error");
+        }
+    }
     // Extensions: a negative prompt (classifier-free guidance) and its scale.
     std::optional<std::string> negative;
     ImageModel model;
@@ -299,6 +501,9 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
             return fail(400, "output_format: png or jpeg", "invalid_request_error");
         jpeg = f == "jpeg";
     }
+    if (up)
+        if (const std::string why = too_big(*up, width, height); !why.empty())
+            return fail(400, "upscale: " + why, "invalid_request_error");
     if (in_flight.fetch_add(1) > opts.max_waiting) {
         --in_flight;
         return fail(503, std::format("{} requests are already waiting", opts.max_waiting), "server_busy");
@@ -314,6 +519,7 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
               height, model.name, negative ? ", a negative prompt" : "", lora_names,
               start.empty() ? "" : std::format(", from an image (strength {:g})", strength));
     std::string data = "[";
+    uint32_t out_w = width, out_h = height; // the images' size (upscaled, if asked)
     try {
         std::string key = model.key();
         for (const auto& l : loras)
@@ -346,10 +552,20 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
                 log::info("{}: image {} of {}, step {} of {} ({:.1f} s a step, ~{:.0f} s left)", id, i + 1, n, step,
                           steps, s / step, s / step * (steps - step));
             };
-            const auto img = engine->generate(r);
-            auto bytes = image::encode_png(image::to_rgba8(img), width, height, false, jpeg);
+            auto img = engine->generate(r);
+            image::Provenance prov = engine->provenance(r);
+            if (up) {
+                const auto t_up = std::chrono::steady_clock::now();
+                Upscaled u = upscale(*up, img, width, height);
+                img = std::move(u.rgba);
+                out_w = u.width;
+                out_h = u.height;
+                prov.upscale = {up->model.name, u.scale};
+                log::info("{}: image {} of {} upscaled to {}x{} with {} in {:.1f} s", id, i + 1, n, out_w, out_h,
+                          up->model.name, std::chrono::duration<double>(std::chrono::steady_clock::now() - t_up).count());
+            }
+            auto bytes = image::encode_png(image::to_rgba8(img), out_w, out_h, false, jpeg);
             if (!jpeg) {
-                image::Provenance prov = engine->provenance(r);
                 prov.model = model.name;
                 for (const auto& l : loras)
                     prov.loras.push_back({std::filesystem::path(l.path).stem().string(), l.scale, l.merge});
@@ -367,7 +583,7 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
     const int64_t created =
         std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     res.set_content(std::format(R"({{"created":{},"data":{},"output_format":"{}","size":"{}x{}"}})", created, data,
-                                jpeg ? "jpeg" : "png", width, height),
+                                jpeg ? "jpeg" : "png", out_w, out_h),
                     "application/json");
 }
 
@@ -469,8 +685,8 @@ void ImageServer::Impl::loras(const httplib::Request& req, httplib::Response& re
 }
 
 
-ImageServer::ImageServer(ImageResidency& residency, LoadImage load, ImageServerOptions opts)
-    : impl_(std::make_unique<Impl>(residency, std::move(load), std::move(opts)))
+ImageServer::ImageServer(ImageResidency& residency, LoadImage load, ImageServerOptions opts, LoadUpscaler load_upscaler)
+    : impl_(std::make_unique<Impl>(residency, std::move(load), std::move(opts), std::move(load_upscaler)))
 {
     auto& h = impl_->http;
     h.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
@@ -495,6 +711,12 @@ ImageServer::ImageServer(ImageResidency& residency, LoadImage load, ImageServerO
     const auto list = [this](const httplib::Request&, httplib::Response& res) { impl_->image_model_list(res); };
     h.Get("/v1/images/models", list);
     h.Get("/images/models", list);
+    const auto upscales = [this](const httplib::Request& req, httplib::Response& res) { impl_->upscales(req, res); };
+    h.Post("/v1/images/upscales", upscales);
+    h.Post("/images/upscales", upscales);
+    const auto upscalers = [this](const httplib::Request&, httplib::Response& res) { impl_->upscaler_list(res); };
+    h.Get("/v1/images/upscalers", upscalers);
+    h.Get("/images/upscalers", upscalers);
     h.Get("/health", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(R"({"status":"ok"})", "application/json");
     });

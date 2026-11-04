@@ -6,6 +6,7 @@
 #include <httplib.h>
 
 #include <chrono>
+#include <filesystem>
 #include <print>
 #include <stdexcept>
 #include <string>
@@ -64,8 +65,43 @@ int main()
     check(r && r->status == 400 && r->body.contains("longer than"), "a prompt too long");
     r = post(R"({"prompt": "a cat"})");
     check(r && r->status == 400 && r->body.contains("error"), "the default model's directory missing: an error");
+    r = c.Get("/v1/images/upscalers");
+    check(r && r->status == 200 && r->body.contains(R"("data":[])"), "/v1/images/upscalers: none to list");
+    r = post(R"({"prompt": "a cat", "upscale": "4x-UltraSharp"})");
+    check(r && r->status == 400 && r->body.contains("no upscalers"), "a generation's upscale without upscalers");
+    r = post(R"({"prompt": "a cat", "upscale": {"model": "x", "tile": 1}})");
+    check(r && r->status == 400 && r->body.contains("unknown field tile"), "a generation's upscale with a stray field");
+    const auto up = [&](const std::string& body) { return c.Post("/v1/images/upscales", body, "application/json"); };
+    r = up(R"({"model": "x"})");
+    check(r && r->status == 400 && r->body.contains("image is required"), "an upscale without an image");
+    r = up(R"({"image": "not base64!"})");
+    check(r && r->status == 400 && r->body.contains("image must be"), "an upscale with a bad image");
+    r = up(R"({"image": "aGVsbG8=", "scale": 0.5})");
+    check(r && r->status == 400 && r->body.contains("scale must be"), "an upscale below 1x");
+    r = up(R"({"image": "aGVsbG8="})");
+    check(r && r->status == 400 && r->body.contains("no upscalers"), "an upscale without upscalers");
     server.stop();
     t.join();
+    // With an (empty) upscalers directory.
+    const auto dir = std::filesystem::temp_directory_path() / "mako_image_server_test_upscalers";
+    std::filesystem::create_directories(dir);
+    opts.upscalers = dir.string();
+    mako::server::ImageServer server2(
+        residency, [](const mako::server::ImageModel&, const mako::image::Loras&) -> std::unique_ptr<mako::image::Engine> {
+            throw std::runtime_error("no models in this test");
+        },
+        opts);
+    std::thread t2([&] { server2.run(); });
+    for (int i = 0; i < 200 && !server2.port(); ++i)
+        std::this_thread::sleep_for(10ms);
+    httplib::Client c2("127.0.0.1", server2.port());
+    r = c2.Post("/v1/images/upscales", R"({"image": "aGVsbG8=", "model": "nope"})", "application/json");
+    check(r && r->status == 400 && r->body.contains("no upscaler named"), "an upscaler that is not there");
+    r = c2.Post("/v1/images/upscales", R"({"image": "aGVsbG8="})", "application/json");
+    check(r && r->status == 400 && r->body.contains("no upscalers in"), "the first upscaler of none");
+    server2.stop();
+    t2.join();
+    std::filesystem::remove_all(dir);
     std::println("{}", failures ? "FAILED" : "all passed");
     return failures ? 1 : 0;
 }

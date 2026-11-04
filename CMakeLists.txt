@@ -28,7 +28,7 @@ add_subdirectory(external/mako-common)
 set(S ${CMAKE_CURRENT_SOURCE_DIR}/src)
 mako_add_kernels(image_kernels SOURCES ${S}/kernels/image.metal)
 
-add_library(mako_imagegen STATIC ${S}/image/engine.cpp ${S}/image/qwen_image.cpp ${S}/image/krea2.cpp
+add_library(mako_imagegen STATIC ${S}/image/conv.cpp ${S}/image/engine.cpp ${S}/image/esrgan.cpp ${S}/image/qwen_image.cpp ${S}/image/krea2.cpp
             ${S}/image/moss_image.cpp ${S}/image/anima.cpp ${S}/image/sdxl.cpp ${S}/image/clip_tokenizer.cpp ${S}/image/er_sde.cpp
             ${S}/image/png.cpp)
 target_include_directories(mako_imagegen PUBLIC ${S})
@@ -43,6 +43,8 @@ add_executable(mako_image tools/mako_image.cpp)
 target_link_libraries(mako_image PRIVATE mako_imagegen mako_memory mako_app)
 add_executable(mako_image_serve tools/mako_image_serve.cpp)
 target_link_libraries(mako_image_serve PRIVATE mako_image_server mako_app)
+add_executable(mako_upscale tools/mako_upscale.cpp)
+target_link_libraries(mako_upscale PRIVATE mako_imagegen mako_app)
 
 # Model-backed tests need the models' directories and the references' tensors; without them they report as skipped.
 set(MAKO_QWEN_IMAGE "$ENV{MAKO_QWEN_IMAGE}" CACHE PATH "Qwen-Image 2.1 directory (its safetensors) for its tests")
@@ -59,5 +61,7 @@ set(MAKO_SDXL "$ENV{MAKO_SDXL}" CACHE PATH "SDXL directory (its checkpoint and t
 set(MAKO_SDXL_REF "$ENV{MAKO_SDXL_REF}" CACHE PATH "SDXL reference tensors for its tests")
 set(MAKO_SDXL_LORA "$ENV{MAKO_SDXL_LORA}" CACHE FILEPATH "SDXL LoRA (Kohya's format) its reference's lora_manifest.json names")
 set(MAKO_T5_TOKENIZER "$ENV{MAKO_T5_TOKENIZER}" CACHE FILEPATH "T5 tokenizer.json for the unigram tokenizer test")
+set(MAKO_UPSCALERS "$ENV{MAKO_UPSCALERS}" CACHE PATH "ESRGAN upscalers (.safetensors) for their test")
+set(MAKO_ESRGAN_REF "$ENV{MAKO_ESRGAN_REF}" CACHE PATH "ESRGAN reference outputs (a directory a model) for the upscalers' test")
 enable_testing()
 add_subdirectory(tests)

@@ -1,16 +1,19 @@
 // OpenAI's image API for Qwen-Image 2.1, Krea 2, MOSS-Image and Anima.
-//   mako_image_serve [--image-models DIR] [--image-model NAME|DIR] [--host H] [--port N] [--api-key KEY[,KEY...]]
-//                    [--api-key-file FILE] [--max-waiting N] [--llm URL] [--llm-api-key KEY]
+//   mako_image_serve [--image-models DIR] [--image-model NAME|DIR] [--upscalers DIR] [--host H] [--port N]
+//                    [--api-key KEY[,KEY...]] [--api-key-file FILE] [--max-waiting N] [--llm URL] [--llm-api-key KEY]
 // --image-models: a directory of image model directories (each its files as published, or a mako.json pointing at
 // them with its settings and LoRAs: server::ImageModel); a request's "model" picks one (GET /v1/images/models lists
 // them). --image-model: the one for requests that name none (a name there, or a model directory; default: the first).
 // A model loads with the first request for it and stays loaded; another model or other LoRAs replace it.
+// --upscalers: a directory of ESRGAN upscalers, NAME.safetensors each (tools/esrgan_to_safetensors.py), for
+// POST /v1/images/upscales and a generation's "upscale" (default: --image-models' upscalers/ when it exists).
 // --llm: a mako_serve on this machine whose memory the models borrow (its URL, e.g. http://127.0.0.1:8080): before a
 // model loads the LLM is unloaded, and when a chat request comes the model is freed and the LLM loads again. Without
 // it the models' memory is their own (another machine, or one with room for both).
 // Environment variables MAKO_IMAGE_<OPTION> (e.g. MAKO_IMAGE_PORT) stand for the options.
 #include "app/cli.hpp"
 #include "image/engine.hpp"
+#include "image/esrgan.hpp"
 #include "log/log.hpp"
 #include "memory/borrower.hpp"
 #include "mtl/context.hpp"
@@ -54,6 +57,8 @@ int main(int argc, char** argv)
         .option("--image-models", "DIR", "a directory of image model directories", so.image_models)
         .option("--image-model", "NAME|DIR", "the model for requests that name none (default: the first)",
                 so.image_model)
+        .option("--upscalers", "DIR", "a directory of ESRGAN upscalers (default: --image-models' upscalers/)",
+                so.upscalers)
         .option("--host", "H", "address to listen on (default 127.0.0.1; others need an API key)", so.host)
         .option("--port", "N", "port to listen on (default 8082)", so.port)
         .option("--api-key", "KEY[,KEY...]", "keys requests must carry (Bearer or x-api-key)",
@@ -99,6 +104,13 @@ int main(int argc, char** argv)
         std::println(stderr, "--image-model {}: not a directory (or give --image-models)", so.image_model);
         return 2;
     }
+    if (so.upscalers.empty() && !so.image_models.empty() &&
+        std::filesystem::is_directory(std::filesystem::path(so.image_models) / "upscalers"))
+        so.upscalers = (std::filesystem::path(so.image_models) / "upscalers").string();
+    if (!so.upscalers.empty() && !std::filesystem::is_directory(so.upscalers)) {
+        std::println(stderr, "--upscalers {}: not a directory", so.upscalers);
+        return 2;
+    }
 
     mako::mtl::Context ctx;
     std::unique_ptr<mako::memory::Borrower> borrower;
@@ -114,9 +126,12 @@ int main(int argc, char** argv)
     if (!so.image_models.empty())
         for (const auto& m : mako::server::image_models(so.image_models))
             mako::log::info("image model {}: {}{}", m.name, m.dir, m.loras.empty() ? "" : " (with LoRAs)");
+    for (const auto& u : mako::server::upscaler_choices(so.upscalers))
+        mako::log::info("upscaler {}: {} blocks, {}x", u.name, u.blocks, u.factor);
+    const auto load_upscaler = [&](const std::string& path) { return std::make_unique<mako::image::Esrgan>(path, ctx); };
     mako::log::info("models load with the first request for them{}",
                     llm.empty() ? "" : std::format("; memory borrowed from the LLM at {}", llm));
-    mako::server::ImageServer server(residency, load, so);
+    mako::server::ImageServer server(residency, load, so, load_upscaler);
     std::jthread stopper([&] {
         int sig = 0;
         sigwait(&stop_signals, &sig);

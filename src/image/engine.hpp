@@ -1,6 +1,6 @@
 #pragma once
 
-#include "gpu/runtime.hpp"
+#include "image/conv.hpp"
 #include "image/png.hpp"
 #include "safetensors/safetensors.hpp"
 #include "text/tokenizer.hpp"
@@ -51,7 +51,7 @@ const char* sampler_name(Sampler s);
 // An image model from its original files (a directory with model_index.json, text_encoder/, transformer/, vae/,
 // scheduler/): the parts the models share, the Qwen3-VL text encoder, the VAE decoder, the flow-matching schedule and
 // the denoising loop. QwenImage and Krea2 add their diffusion transformers; open() picks one from model_index.json.
-class Engine : public gpu::Runtime {
+class Engine : public ConvRuntime {
 public:
     // The model in `dir`, by the pipeline model_index.json names. Throws on a model it does not know.
     static std::unique_ptr<Engine> open(const std::string& dir, mtl::Context& ctx, const Options& opts = {});
@@ -192,18 +192,7 @@ protected:
     // a token packs a 2x2 patch, the latents scaled by `scale`.
     void load_vae_ldm(const std::string& file, const std::string& prefix, float scale);
 
-    // Convolutions as GEMMs over channels-last images: weights F16 [cout][kpad] (cin * k * k columns, a 3x3's zero
-    // padded to a multiple of 64). A causal 3D convolution's weights are its last time tap's (a single frame).
-    struct Conv {
-        Tensor w, b;
-        uint32_t cin = 0, cout = 0, k = 3, kpad = 0, stride = 1;
-        uint32_t pad = 1; // stride 2: padding above and left (below and right always 1)
-    };
-    // `name`.weight and .bias (F32, F16 or BF16): a convolution (or a linear layer, as a 1x1), or several of one
-    // input's with their outputs side by side.
-    Conv load_conv(const safetensors::Files& files, std::span<const std::string> names, uint32_t k);
-    // y = conv(x) over an h x w image (with stride 2, a 3x3 to h / 2 x w / 2).
-    void conv(MTL::ComputeCommandEncoder*& enc, const Conv& c, MTL::Buffer* x, uint32_t h, uint32_t w, MTL::Buffer* y);
+    using ConvRuntime::load_conv;
     // Group norm (32 groups) times g plus b over channels-last images, then SiLU when silu is set.
     void group_norm(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, const Tensor& g, const Tensor& b, MTL::Buffer* y,
                     uint32_t rows, uint32_t c, bool silu, float eps = 1e-6f);
@@ -256,11 +245,6 @@ protected:
     void attention(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* q, MTL::Buffer* k, MTL::Buffer* v, MTL::Buffer* o,
                    uint32_t n_q, uint32_t q_pad, uint32_t n_k, uint32_t k_pad, uint32_t heads, uint32_t kv_heads,
                    uint32_t q_pos0, uint32_t block);
-    // y[r][i] += b[i] over rows of n.
-    void bias(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* y, const Tensor& b, uint32_t n, uint32_t rows,
-              uint64_t y_off = 0);
-    // A tensor's values as floats.
-    static std::vector<float> floats(const safetensors::Files& files, const std::string& name);
     void unary(MTL::ComputeCommandEncoder*& enc, const char* fn, MTL::Buffer* x, uint32_t n);
 
     static constexpr uint32_t kHeadDim = 128;

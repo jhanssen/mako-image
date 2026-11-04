@@ -65,6 +65,7 @@ kernel void gate_add(device float* x [[buffer(0)]], device const float* y [[buff
 
 struct Im2colArgs {
     uint h, w, c;   // input image
+    uint ldx;       // its pixels' stride (c, or wider rows the image is the first c channels of)
     uint p0, rows;  // output pixels [p0, p0 + rows)
     uint kpad;      // columns, 9 * c padded to a multiple of 32
 };
@@ -82,9 +83,25 @@ kernel void im2col3x3(device const float* x [[buffer(0)]], device half* out [[bu
         const uint ch = col / 9, kk = col % 9, p = a.p0 + r;
         const int y = int(p / a.w) + int(kk / 3) - 1, xx = int(p % a.w) + int(kk % 3) - 1;
         if (y >= 0 && y < int(a.h) && xx >= 0 && xx < int(a.w))
-            v = x[(uint64_t(y) * a.w + uint(xx)) * a.c + ch];
+            v = x[(uint64_t(y) * a.w + uint(xx)) * a.ldx + ch];
     }
     out[uint64_t(r) * a.kpad + col] = half(v);
+}
+
+struct BiasActArgs {
+    uint n, ld;  // values a row, and the rows' stride
+    float slope; // LeakyReLU's negative slope (1: none)
+};
+
+// y[r][i] = lrelu(y[r][i] + b[i]) over rows ld apart. Grid (n, rows).
+kernel void bias_act(device float* y [[buffer(0)]], device const float* b [[buffer(1)]],
+                     constant BiasActArgs& a [[buffer(2)]], uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= a.n)
+        return;
+    device float* v = y + uint64_t(gid.y) * a.ld + gid.x;
+    const float s = *v + b[gid.x];
+    *v = s < 0.0f ? s * a.slope : s;
 }
 
 // im2col3x3 for a stride-2 convolution (padding 1): output pixel p0 + r = (y, x) of an ow-wide image reads input

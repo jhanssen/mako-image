@@ -104,3 +104,16 @@ came out a few percent off.
   evenly spaced in timestep, interpolated in log sigma), the UNet's timestep the nearest level; inputs scaled by
   1 / sqrt(sigma^2 + 1), the start noise by sqrt(1 + sigma_max^2). Euler, or Euler ancestral (the default): down to
   sqrt(next^2 - up^2), then fresh noise times up = next sqrt(1 - next^2 / sigma^2).
+
+### ESRGAN upscalers
+
+`image::Esrgan` runs RRDBNet (the original ESRGAN's and Real-ESRGAN's, from a safetensors in Real-ESRGAN's names that
+`tools/esrgan_to_safetensors.py` makes of a checkpoint) on `image::ConvRuntime`, the convolutions the VAEs use: each
+3x3 unfolded (im2col) to half rows of cin * 9 and multiplied by F16 weights on the dense GEMM, over channels-last
+images. A dense block's five convolutions write into one wide buffer [pixels][nf + 4 gc] (the GEMM's row stride and
+offset put each output after the block's input and the earlier outputs), so each reads its concatenated input without
+a copy; bias and LeakyReLU are one kernel. The residuals are scale_add with a vector of 0.2; the nearest 2x
+upsampling is the VAE's. Images past 1024 pixels a side run in tiles with 32 pixels of context. Against PyTorch's
+fp32 output the F16 path is 1-2e-4 off on a 48x32 crop. The time (5.9 s for 1024x768 at 4x; ComfyUI on MPS 3.1 s) is
+the unfolded copies: the dense convolutions write and read about 600 GB of them for that image, where a convolution
+that unfolds inside the GEMM's tiles would read the image once.

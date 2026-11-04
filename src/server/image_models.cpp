@@ -294,5 +294,38 @@ image::Loras resolve_loras(std::string_view json, const std::vector<LoraChoice>&
     return out;
 }
 
+std::vector<UpscalerChoice> upscaler_choices(const std::string& dir)
+{
+    std::vector<UpscalerChoice> out;
+    if (dir.empty())
+        return out;
+    std::vector<fs::path> files;
+    std::error_code ec;
+    for (const auto& e : fs::directory_iterator(dir, ec))
+        if (e.path().extension() == ".safetensors" && e.is_regular_file(ec))
+            files.push_back(e.path());
+    std::ranges::sort(files);
+    for (const auto& f : files) {
+        auto file = safetensors::File::open(f.string());
+        if (!file) {
+            log::warn("upscaler {}: {}", f.filename().string(), file.error());
+            continue;
+        }
+        if (!file->tensor("conv_first.weight") || !file->tensor("conv_last.weight") ||
+            !file->tensor("body.0.rdb1.conv1.weight")) {
+            log::warn("upscaler {}: not an ESRGAN in Real-ESRGAN's names (tools/esrgan_to_safetensors.py converts "
+                      "checkpoints); left out",
+                      f.filename().string());
+            continue;
+        }
+        UpscalerChoice c{f.stem().string(), f.string()};
+        while (file->tensor(std::format("body.{}.rdb1.conv1.weight", c.blocks)))
+            ++c.blocks;
+        for (uint32_t i = 1; file->tensor(std::format("conv_up{}.weight", i)); ++i)
+            c.factor *= 2;
+        out.push_back(std::move(c));
+    }
+    return out;
+}
 
 } // namespace mako::server

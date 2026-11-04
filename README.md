@@ -35,13 +35,15 @@ cmake --build mako-image/build
 ./build/mako_image_serve --image-models ~/models/image --port 8082 --llm http://127.0.0.1:8080
 ```
 
-Options: `--image-models DIR`, `--image-model NAME|DIR`, `--host H`, `--port N` (default 8082), `--api-key
+Options: `--image-models DIR`, `--image-model NAME|DIR`, `--upscalers DIR` (ESRGAN upscalers, below; default
+`--image-models`' `upscalers/`), `--host H`, `--port N` (default 8082), `--api-key
 KEY[,KEY...]` / `--api-key-file FILE` (needed to listen beyond loopback), `--max-waiting N`, `--llm URL` and
 `--llm-api-key KEY` (when mako_serve wants one). Each also from `MAKO_IMAGE_<OPTION>` (e.g. `MAKO_IMAGE_PORT`), and
 from presets (`--preset NAME`, `MAKO_IMAGE_PRESET`).
 
 `mako_image <model dir> <prompt> [-o out.png] ...` renders from the command line (`--help` lists its options; `--llm`
-works the same).
+works the same; `--upscale FILE[:SCALE]` runs an ESRGAN upscaler on the result). `mako_upscale MODEL.safetensors IMAGE
+[-o out.png] [--scale F]` upscales an image.
 
 ## API
 
@@ -167,6 +169,22 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   steps before its end (the share run, default 1). The maps go through the VAE encoder; the adapter widens the image
   input to [latents | colour | depth] and brings a LoRA (its blocks' part kept unmerged, its text refiner's merged).
   With the 8-step DMD LoRA an end of 0.25 kept poses and placement without the map's shapes showing in the bodies.
+- Upscaling with ESRGAN models (the original's and Real-ESRGAN's RRDBNet: 4x-UltraSharp, 4x-AnimeSharp,
+  RealESRGAN_x4plus_anime_6B tried) from `--upscalers DIR` (default: `--image-models`' `upscalers/`), `NAME.safetensors`
+  each, converted from the .pth checkpoints by `tools/esrgan_to_safetensors.py MODEL.pth [OUT.safetensors]` (no torch
+  needed; the original ESRGAN's layer names become Real-ESRGAN's). `GET /v1/images/upscalers` lists them (`name`,
+  `factor`, `blocks`). `POST /v1/images/upscales` with `image` (base64 or a `data:` URL, at most 2048x2048 pixels'
+  area), `model` (default: the first by name), `scale` (1 to the upscaler's factor, default the factor; less is
+  resampled down from its output with Lanczos) and `output_format` answers like a generation, `size` the result's
+  (no provenance chunks). A generation's `upscale` (a name, or `{"model": NAME, "scale": F}`) upscales its images
+  before they are encoded; the PNG records it (`Hires upscale`, `Hires upscaler`; `mako`'s `upscale`). The result is
+  at most 4096x4096 pixels' area. The weights run as F16 (0.8-2.2e-4 off PyTorch's fp32 output on a 48x32 crop);
+  images over 1024 pixels a side run in 1024-pixel tiles with 32 of context. 1024x768 at 4x takes 5.9 s (ComfyUI's
+  MPS path 3.1 s; docs/architecture.md says why). Loaded upscalers stay in memory (33 MB each); their scratch
+  buffers (about 8 GB for 1024x768 at 4x) are freed after each image. `mako_upscale MODEL.safetensors IMAGE [-o
+  out.png] [--scale F] [--tile N] [--overlap N]` does the same from the command line, `mako_image --upscale
+  FILE[:SCALE]` after a generation, the skill's `render.sh --upscale NAME[:SCALE]` through the server
+  (`scripts/upscalers.sh` lists them).
 - Not yet: condition images (edits, references; `/v1/images/edits`), and image to image for the other models (their
   VAEs' encoders).
 
@@ -187,9 +205,13 @@ The `cpu` tests include `er_sde`: the ER-SDE sampler over a made-up model agains
 | `MAKO_MOSS`, `MAKO_MOSS_REF` | `moss_*` |
 | `MAKO_ANIMA`, `MAKO_ANIMA_TRANSFORMER`, `MAKO_ANIMA_REF` | `anima_*` |
 | `MAKO_SDXL`, `MAKO_SDXL_REF`, `MAKO_SDXL_LORA` | `sdxl_*` |
+| `MAKO_UPSCALERS`, `MAKO_ESRGAN_REF` | `esrgan` |
 | `MAKO_T5_TOKENIZER` (a T5 `tokenizer.json`) | `unigram` |
 
 The image tests compare with reference tensors from the original pipeline (fp32 on the CPU), written by a Python
-script kept beside the model, not in this repository.
+script kept beside the model, not in this repository. `esrgan` compares the upscalers with PyTorch's output
+(spandrel's RRDBNet, fp32) for a 48x32 crop of a render: `MAKO_ESRGAN_REF/NAME/` holds `manifest.json` (`width`,
+`height`, `factor`), `input.f32` and `output.f32` (RGBA channels-last in [-1, 1]) for `MAKO_UPSCALERS/NAME.safetensors`,
+all at once and in 16-pixel tiles.
 
 More: [architecture](docs/architecture.md), [performance](docs/performance.md).

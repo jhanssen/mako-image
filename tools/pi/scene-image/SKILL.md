@@ -252,11 +252,15 @@ uses unless told otherwise, at the scale shown.
 - `--color-map FILE`, `--depth-map FILE`, `--color-end F`, `--depth-end F`: control maps for a model with a control
   adapter (see "Layouts"; a draft's `color_map` / `depth_map` are passed by themselves).
 - `--layout DRAFT`: a MOSS-Image layout in place of size and prompt (see "Layouts").
+- `--upscale NAME[:SCALE]`: after the render, the server's ESRGAN upscaler NAME (`scripts/upscalers.sh` lists them,
+  with what each multiplies a side by) enlarges the image to SCALE times the size (default: the upscaler's own, 4 for
+  most; less is resampled down from its output). Use it when the user asks for a larger or sharper image; it adds
+  a few seconds. The upscalers tried are for drawn and anime-style images; none changes the style.
 
 The environment, set by the user: `MAKO_IMAGE_URL` and `MAKO_IMAGE_API_KEY` (the server), `MAKO_IMAGE_DIR` (where
 images are saved, default `~/Pictures/mako`), `MAKO_IMAGE_OPEN=0` (do not open the image viewer), `MAKO_TAGS_CSV`
-(the tag list). `scripts/models.sh` takes no options; `scripts/loras.sh [MODEL]` lists the server's default model's
-LoRAs without one.
+(the tag list). `scripts/models.sh` and `scripts/upscalers.sh` take no options; `scripts/loras.sh [MODEL]` lists the
+server's default model's LoRAs without one.
 
 If a script fails, report its message: mako_image_serve may not be running (or not at `MAKO_IMAGE_URL`), may need an
 API key (`MAKO_IMAGE_API_KEY`), or may not have a model or LoRA of that name (list them again). A message starting

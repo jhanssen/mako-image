@@ -3,7 +3,7 @@
 //              [--lora FILE[:SCALE] ...] [--terminal F] [--text-encoder DIR] [--transformer PATH] [--adapter DIR]
 //              [--negative TEXT] [--guidance F] [--sampler NAME] [--skip-blocks LIST] [--image FILE] [--strength F]
 //              [--control FILE] [--color-map FILE] [--depth-map FILE] [--color-end F] [--depth-end F]
-//              [--llm URL] [--llm-api-key KEY]
+//              [--upscale FILE[:SCALE]] [--llm URL] [--llm-api-key KEY]
 // --lora adds a LoRA (repeatable; SCALE its strength, default 1; :merge into the weights or :unmerged beside them,
 // default the model's way: unmerged for MOSS-Image). --terminal: the schedule's last
 // noise level (0: not stretched there, as distilled few-step LoRAs are trained; default: the model's).
@@ -18,9 +18,12 @@
 // its own size, at most 1024x1024 pixels' area); --strength: the share of the steps run on it (default 0.75).
 // --control: a MOSS-Image control adapter; --color-map (a flat colour per subject) and --depth-map (near white) steer
 // the layout, each for the first --color-end / --depth-end share of the steps (default 1).
+// --upscale: an ESRGAN upscaler (tools/esrgan_to_safetensors.py) run on each image afterwards, to SCALE times the
+// size (default: the upscaler's own, 4 for most; less is resampled down from its output).
 // --llm: a mako_serve on this machine whose memory to borrow while the model is loaded (it unloads its LLM meanwhile).
 #include "app/cli.hpp"
 #include "image/engine.hpp"
+#include "image/esrgan.hpp"
 #include "image/png.hpp"
 #include "log/log.hpp"
 #include "memory/borrower.hpp"
@@ -29,6 +32,7 @@
 #include <Foundation/Foundation.hpp>
 
 #include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -72,7 +76,8 @@ int main(int argc, char** argv)
     std::optional<std::string> negative;
     std::optional<mako::image::Sampler> sampler;
     std::optional<std::vector<uint32_t>> skip_blocks;
-    std::string text_encoder, transformer, adapter;
+    std::string text_encoder, transformer, adapter, upscaler;
+    float upscale = 0;
     bool rgb = false;
     mako::app::Cli cli("mako_image", "<model dir> <prompt>", 2, 2);
     cli.option("-o", "FILE", "the PNG to write (default image.png)", out)
@@ -118,6 +123,15 @@ int main(int argc, char** argv)
         .option("--depth-end", "F", "the share of the steps the depth map steers (default 1)", depth_end)
         .option("--terminal", "F", "the schedule's last noise level (0: none)",
                 [&](const std::string& v) { terminal = mako::app::Cli::parse<float>(v); })
+        .option("--upscale", "FILE[:SCALE]", "an ESRGAN upscaler run on the images, to SCALE times the size",
+                [&](const std::string& v) {
+                    const size_t colon = v.rfind(':');
+                    upscaler = v;
+                    if (colon != std::string::npos && colon > 0 && v.find('/', colon) == std::string::npos) {
+                        upscaler = v.substr(0, colon);
+                        upscale = mako::app::Cli::parse<float>(v.substr(colon + 1));
+                    }
+                })
         .option("--llm", "URL", "a mako_serve on this machine to borrow memory from", llm)
         .option("--llm-api-key", "KEY", "the key that mako_serve wants", llm_key)
         .secret();
@@ -138,6 +152,14 @@ int main(int argc, char** argv)
         auto& engine = *model;
         for (const auto& l : loras)
             engine.add_lora(l);
+        std::optional<mako::image::Esrgan> up;
+        if (!upscaler.empty()) {
+            up.emplace(upscaler, ctx);
+            if (upscale == 0)
+                upscale = float(up->factor());
+            if (!(upscale >= 1) || upscale > float(up->factor()))
+                throw std::runtime_error(std::format("--upscale: the scale goes from 1 to the upscaler's {}", up->factor()));
+        }
         mako::log::info("loaded in {:.1f} s", ms_since(t_load) / 1e3);
         std::vector<float> start;
         std::vector<uint8_t> bytes;
@@ -187,8 +209,18 @@ int main(int argc, char** argv)
                 t_step = Clock::now();
             };
             const auto t0 = Clock::now();
-            const auto img = engine.generate(r);
+            auto img = engine.generate(r);
             const double gen = ms_since(t0);
+            uint32_t out_w = width, out_h = height;
+            if (up) {
+                const auto t_up = Clock::now();
+                img = up->upscale(img, width, height);
+                out_w = uint32_t(std::lround(width * upscale));
+                out_h = uint32_t(std::lround(height * upscale));
+                if (out_w != width * up->factor() || out_h != height * up->factor())
+                    img = mako::image::resize_image(img, width * up->factor(), height * up->factor(), out_w, out_h);
+                mako::log::info("upscaled to {}x{} in {:.1f} s", out_w, out_h, ms_since(t_up) / 1e3);
+            }
             std::string path = out;
             if (n > 0) {
                 const size_t dot = out.rfind('.');
@@ -199,8 +231,10 @@ int main(int argc, char** argv)
             prov.model = std::filesystem::path(pos[0]).lexically_normal().filename().string();
             for (const auto& l : loras)
                 prov.loras.push_back({std::filesystem::path(l.path).stem().string(), l.scale, l.merge});
+            if (up)
+                prov.upscale = {std::filesystem::path(upscaler).stem().string(), upscale};
             mako::image::write_file(path, mako::image::with_provenance(
-                                              mako::image::encode_png(mako::image::to_rgba8(img), width, height, rgb),
+                                              mako::image::encode_png(mako::image::to_rgba8(img), out_w, out_h, rgb),
                                               prov));
             mako::log::info("{}x{}, {} steps in {:.1f} s: {}", width, height, steps ? steps : engine.default_steps(),
                             gen / 1e3, path);

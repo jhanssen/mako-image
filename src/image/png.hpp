@@ -26,6 +26,9 @@ std::vector<float> decode_image(std::span<const uint8_t> data, uint32_t width, u
 // The size to render an image of w x h pixels to start from when none is asked for: its own, scaled down to 1024x1024
 // pixels' area when larger, in multiples of 32 (at least 256 a side).
 std::pair<uint32_t, uint32_t> start_size(uint32_t w, uint32_t h);
+// RGBA [h][w][4] resampled to [H][W][4] with a 3-lobe Lanczos filter (widened by the ratio when shrinking, as
+// image libraries do), every channel the same way.
+std::vector<float> resize_image(std::span<const float> rgba, uint32_t w, uint32_t h, uint32_t W, uint32_t H);
 
 // How an image was made, for the PNG's text chunks.
 struct Provenance {
@@ -38,6 +41,12 @@ struct Provenance {
     uint64_t seed = 0;
     std::optional<float> strength; // image to image: the share of the steps run on the starting image
     std::optional<float> color_end, depth_end; // control maps given: the share of the steps each steered
+    // Upscaled afterwards: the model's name and the size's multiple.
+    struct Upscale {
+        std::string model;
+        float scale = 1;
+    };
+    std::optional<Upscale> upscale;
     struct Lora {
         std::string name;
         float scale = 1;
@@ -47,7 +56,8 @@ struct Provenance {
 };
 // The PNG with UTF-8 text chunks before its end: "parameters" (the prompt, then "Negative prompt: ...", then
 // "Steps: ..., Sampler: ..., CFG scale: ..., Seed: ..., Size: WxH, Model: ...", as image tools commonly read it)
-// and "mako" (the same as JSON, with the LoRAs). Throws std::runtime_error on data that is not a PNG.
+// with "Hires upscale: F, Hires upscaler: NAME" when upscaled) and "mako" (the same as JSON, with the LoRAs). Throws
+// std::runtime_error on data that is not a PNG.
 std::vector<uint8_t> with_provenance(std::vector<uint8_t> png, const Provenance& p);
 
 } // namespace mako::image

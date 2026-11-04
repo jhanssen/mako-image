@@ -47,6 +47,12 @@ endforeach()
 add_test(NAME sdxl_lora COMMAND sdxl_ref_test "${MAKO_SDXL}" "${MAKO_SDXL_REF}" lora "${MAKO_SDXL_LORA}")
 set_tests_properties(sdxl_lora PROPERTIES LABELS image SKIP_RETURN_CODE 77)
 
+# ESRGAN upscalers against PyTorch's outputs (MAKO_ESRGAN_REF, a directory a model; the models in MAKO_UPSCALERS).
+add_executable(esrgan_test esrgan_test.cpp)
+target_link_libraries(esrgan_test PRIVATE mako_imagegen glaze_headers)
+add_test(NAME esrgan COMMAND esrgan_test "${MAKO_UPSCALERS}" "${MAKO_ESRGAN_REF}")
+set_tests_properties(esrgan PROPERTIES LABELS image SKIP_RETURN_CODE 77)
+
 # The model in memory against a lender on loopback (a stand-in model; no GPU).
 add_executable(residency_test residency_test.cpp)
 target_link_libraries(residency_test PRIVATE mako_image_server httplib_headers)
