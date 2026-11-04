@@ -11,11 +11,7 @@ namespace mako::image {
 namespace {
 
 struct Im2colArgs {
-    uint32_t h, w, c, ldx, p0, rows, kpad;
-};
-struct BiasActArgs {
-    uint32_t n, ld;
-    float slope;
+    uint32_t h, w, c, p0, rows, kpad;
 };
 
 uint32_t round_up(uint32_t x, uint32_t m) { return (x + m - 1) / m * m; }
@@ -143,15 +139,6 @@ ConvRuntime::Conv ConvRuntime::load_conv(const safetensors::Files& files, std::s
 void ConvRuntime::conv(MTL::ComputeCommandEncoder*& enc, const Conv& c, MTL::Buffer* x, uint32_t h, uint32_t w,
                        MTL::Buffer* y)
 {
-    conv(enc, c, x, h, w, y, Layout{});
-}
-
-void ConvRuntime::conv(MTL::ComputeCommandEncoder*& enc, const Conv& c, MTL::Buffer* x, uint32_t h, uint32_t w,
-                       MTL::Buffer* y, const Layout& l)
-{
-    const bool laid = l.ldx || l.ldy || l.y_off || l.slope != 1.0f;
-    if (laid && (c.k != 3 || c.stride != 1))
-        throw std::runtime_error("conv: a layout is for 3x3 convolutions of stride 1");
     if (c.stride == 2) { // a 3x3 to the half-size image, padded by c.pad above and left, 1 below and right
         const uint32_t oh = (h + c.pad - 2) / 2 + 1, ow = (w + c.pad - 2) / 2 + 1, rows = oh * ow;
         const uint32_t chunk = std::max(256u, uint32_t((256ull << 20) / (uint64_t(c.kpad) * 2)) / 256 * 256);
@@ -180,27 +167,16 @@ void ConvRuntime::conv(MTL::ComputeCommandEncoder*& enc, const Conv& c, MTL::Buf
                       halves(enc, in, 0, rows, c.kpad, 0), 0, y, 0, 0, 0, c.kpad % 64 == 0);
         after(enc, "conv1x1");
     } else {
-        const uint32_t ldy = l.ldy ? l.ldy : c.cout;
         // Image rows a pass, so the unfolded copy stays near 256 MB, in multiples of 256 (the GEMM's largest tiles).
         const uint32_t chunk = std::max(256u, uint32_t((256ull << 20) / (uint64_t(c.kpad) * 2)) / 256 * 256);
         MTL::Buffer* col = scratch("v_col", uint64_t(std::min(chunk, rows)) * c.kpad * 2);
         for (uint32_t p0 = 0; p0 < rows; p0 += chunk) {
             const uint32_t n = std::min(chunk, rows - p0);
-            const Im2colArgs a{h, w, c.cin, l.ldx ? l.ldx : c.cin, p0, n, c.kpad};
+            const Im2colArgs a{h, w, c.cin, p0, n, c.kpad};
             dispatch(enc, "im2col3x3", {x, col}, &a, sizeof(a), MTL::Size(c.kpad, n, 1), MTL::Size(256, 1, 1));
             gemm_->encode(enc, gguf::Type::F16, c.kpad, c.cout, n, c.w.buf, c.w.off, col, 0, y,
-                          l.y_off + uint64_t(p0) * ldy * 4, l.ldy, 0, true);
+                          uint64_t(p0) * c.cout * 4, 0, 0, true);
             after(enc, "conv3x3");
-        }
-        if (laid) {
-            const BiasActArgs a{c.cout, ldy, l.slope};
-            enc->setComputePipelineState(pso("bias_act"));
-            enc->setBuffer(y, l.y_off, 0);
-            enc->setBuffer(c.b.buf, c.b.off, 1);
-            enc->setBytes(&a, sizeof(a), 2);
-            enc->dispatchThreads(MTL::Size(c.cout, rows, 1), MTL::Size(64, 1, 1));
-            after(enc, "bias_act");
-            return;
         }
     }
     bias(enc, y, c.b, c.cout, rows);

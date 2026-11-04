@@ -1,7 +1,10 @@
 // Qwen-Image's diffusion transformer: modulated layer norms and gated residuals. Each token takes one of two
 // modulation rows: the sampled timestep's (the image) or t = 0's (the text, rows before `split`).
 #include <metal_stdlib>
+#include <metal_tensor>
+#include <MetalPerformancePrimitives/MetalPerformancePrimitives.h>
 using namespace metal;
+using namespace mpp::tensor_ops;
 
 constant uint TG = 256;
 
@@ -65,7 +68,6 @@ kernel void gate_add(device float* x [[buffer(0)]], device const float* y [[buff
 
 struct Im2colArgs {
     uint h, w, c;   // input image
-    uint ldx;       // its pixels' stride (c, or wider rows the image is the first c channels of)
     uint p0, rows;  // output pixels [p0, p0 + rows)
     uint kpad;      // columns, 9 * c padded to a multiple of 32
 };
@@ -83,25 +85,9 @@ kernel void im2col3x3(device const float* x [[buffer(0)]], device half* out [[bu
         const uint ch = col / 9, kk = col % 9, p = a.p0 + r;
         const int y = int(p / a.w) + int(kk / 3) - 1, xx = int(p % a.w) + int(kk % 3) - 1;
         if (y >= 0 && y < int(a.h) && xx >= 0 && xx < int(a.w))
-            v = x[(uint64_t(y) * a.w + uint(xx)) * a.ldx + ch];
+            v = x[(uint64_t(y) * a.w + uint(xx)) * a.c + ch];
     }
     out[uint64_t(r) * a.kpad + col] = half(v);
-}
-
-struct BiasActArgs {
-    uint n, ld;  // values a row, and the rows' stride
-    float slope; // LeakyReLU's negative slope (1: none)
-};
-
-// y[r][i] = lrelu(y[r][i] + b[i]) over rows ld apart. Grid (n, rows).
-kernel void bias_act(device float* y [[buffer(0)]], device const float* b [[buffer(1)]],
-                     constant BiasActArgs& a [[buffer(2)]], uint2 gid [[thread_position_in_grid]])
-{
-    if (gid.x >= a.n)
-        return;
-    device float* v = y + uint64_t(gid.y) * a.ld + gid.x;
-    const float s = *v + b[gid.x];
-    *v = s < 0.0f ? s * a.slope : s;
 }
 
 // im2col3x3 for a stride-2 convolution (padding 1): output pixel p0 + r = (y, x) of an ow-wide image reads input
@@ -741,4 +727,139 @@ kernel void geglu_rows(device const float* hg [[buffer(0)]], device float* m [[b
     device const float* r = hg + uint64_t(gid.y) * 2 * n;
     const float g = r[n + gid.x];
     m[uint64_t(gid.y) * n + gid.x] = r[gid.x] * 0.5f * g * (1.0f + erf_fit(g * 0.70710678f));
+}
+
+// ESRGAN's dense stage: channels-last images with a zero ring (a padded row above and below, a padded pixel left and
+// right of every row), so a 3x3 convolution reads its taps as nine views of the image shifted by whole pixels.
+
+struct ConvArgs {
+    uint t;     // the padded image's pixels (y's rows)
+    uint k;     // input channels read, a multiple of 64 (the weights zero past the real ones)
+    uint n;     // output channels
+    uint ldx;   // x's row stride (half values)
+    uint ldy;   // y's row stride (floats)
+    uint pw;    // the padded image's width
+    uint slack; // rows before (and after) the image in x: at least pw + 1 + the row tile, all zero
+};
+
+// y[p][n] = sum over taps (dy, dx) and k of x[p + (dy - 1) * pw + dx - 1][k] * w[tap][n][k], the ring's own outputs
+// garbage (the bias kernel zeroes them). Weights [9][n][k] half, tap-major. Threadgroups (n / TN, t / TM) of 32 * NSG
+// threads.
+template <int TM, int TN, int NSG, int KD>
+kernel void conv3x3_dense(device const half* w [[buffer(0)]], device const half* x [[buffer(1)]],
+                          device float* y [[buffer(2)]], constant ConvArgs& a [[buffer(3)]],
+                          uint2 tg [[threadgroup_position_in_grid]])
+{
+    const uint n0 = tg.x * TN, t0 = tg.y * TM;
+    tensor<device half, dextents<int32_t, 2>, tensor_inline> tx(const_cast<device half*>(x),
+                                                                 dextents<int32_t, 2>(a.k, a.t + 2 * a.slack),
+                                                                 array<int32_t, 2>{1, int32_t(a.ldx)});
+    tensor<device half, dextents<int32_t, 2>, tensor_inline> tw0(const_cast<device half*>(w),
+                                                                  dextents<int32_t, 2>(a.k, a.n));
+    constexpr auto desc = matmul2d_descriptor(TM, TN, KD, false, true, false,
+                                              matmul2d_descriptor::mode::multiply_accumulate);
+    matmul2d<desc, execution_simdgroups<NSG>> op;
+    auto mx = tx.slice(0, int(a.slack + t0));
+    auto mw = tw0.slice(0, int(n0));
+    auto acc = op.template get_destination_cooperative_tensor<decltype(mx), decltype(mw), float>();
+    for (uint16_t i = 0; i < acc.get_capacity(); ++i)
+        if (acc.is_valid_element(i))
+            acc[i] = 0.0f;
+    for (uint tap = 0; tap < 9; ++tap) {
+        const int r0 = int(a.slack + t0) + int(tap / 3) * int(a.pw) + int(tap % 3) - int(a.pw) - 1;
+        tensor<device half, dextents<int32_t, 2>, tensor_inline> tw(const_cast<device half*>(w) + tap * a.n * a.k,
+                                                                     dextents<int32_t, 2>(a.k, a.n));
+        for (uint k = 0; k < a.k; k += KD) {
+            auto xk = tx.slice(int(k), r0);
+            auto wk = tw.slice(int(k), int(n0));
+            op.run(xk, wk, acc);
+        }
+    }
+    tensor<device float, dextents<int32_t, 2>, tensor_inline> ty(y, dextents<int32_t, 2>(a.n, a.t),
+                                                                 array<int32_t, 2>{1, int32_t(a.ldy)});
+    acc.store(ty.slice(n0, t0));
+}
+
+#define CONV3X3(tm, tn)                                                                                                \
+    template [[host_name("conv3x3_" #tm "x" #tn)]] kernel void conv3x3_dense<tm, tn, 4, 64>(                          \
+        device const half*, device const half*, device float*, constant ConvArgs&, uint2);
+CONV3X3(128, 64)
+CONV3X3(128, 32)
+
+struct PadArgs {
+    uint n, ldx, ldy, c0; // values a row; x's and y's row strides; y's first column
+    uint pw, ph;          // the padded image's width and height: its ring gets 0
+    float slope;          // LeakyReLU's negative slope after the bias (1: none)
+};
+
+static bool on_ring(uint r, constant PadArgs& a)
+{
+    const uint py = r / a.pw, px = r % a.pw;
+    return py == 0 || py == a.ph - 1 || px == 0 || px == a.pw - 1;
+}
+
+// y[r][c0 + i] = half(lrelu(x[r][i] + b[i])), 0 on the ring. Grid (n, rows).
+kernel void bias_pad_half(device const float* x [[buffer(0)]], device const float* b [[buffer(1)]],
+                          device half* y [[buffer(2)]], constant PadArgs& a [[buffer(3)]],
+                          uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= a.n)
+        return;
+    float v = 0.0f;
+    if (!on_ring(gid.y, a)) {
+        v = x[uint64_t(gid.y) * a.ldx + gid.x] + b[gid.x];
+        v = v < 0.0f ? v * a.slope : v;
+    }
+    y[uint64_t(gid.y) * a.ldy + a.c0 + gid.x] = half(v);
+}
+
+// y[r][i] = lrelu(y[r][i] + b[i]) in place, 0 on the ring. Grid (n, rows).
+kernel void bias_pad(device float* y [[buffer(0)]], device const float* b [[buffer(1)]],
+                     constant PadArgs& a [[buffer(2)]], uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x >= a.n)
+        return;
+    device float* v = y + uint64_t(gid.y) * a.ldy + gid.x;
+    if (on_ring(gid.y, a)) {
+        *v = 0.0f;
+        return;
+    }
+    const float s = *v + b[gid.x];
+    *v = s < 0.0f ? s * a.slope : s;
+}
+
+// y[r][c0 + i] = half(x[r][i]). Grid (n, rows).
+kernel void to_half_cols(device const float* x [[buffer(0)]], device half* y [[buffer(1)]],
+                         constant PadArgs& a [[buffer(2)]], uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x < a.n)
+        y[uint64_t(gid.y) * a.ldy + a.c0 + gid.x] = half(x[uint64_t(gid.y) * a.ldx + gid.x]);
+}
+
+// The image without its ring: y[yy][xx][ch] = x[yy + 1][xx + 1][ch] of a (ph x pw) padded image. Grid (c, w, h).
+kernel void unpad(device const float* x [[buffer(0)]], device float* y [[buffer(1)]],
+                  constant PadArgs& a [[buffer(2)]], uint3 gid [[thread_position_in_grid]])
+{
+    const uint ch = gid.x, xx = gid.y, yy = gid.z, w = a.pw - 2, h = a.ph - 2;
+    if (ch >= a.n || xx >= w || yy >= h)
+        return;
+    y[(uint64_t(yy) * w + xx) * a.n + ch] = x[(uint64_t(yy + 1) * a.pw + xx + 1) * a.n + ch];
+}
+
+// Zeroes n groups of 8 halves. Grid (n).
+kernel void zero_half8(device uint4* p [[buffer(0)]], constant uint& n [[buffer(1)]], uint i [[thread_position_in_grid]])
+{
+    if (i < n)
+        p[i] = uint4(0);
+}
+
+// Nearest 2x of a padded half image into a padded one twice the size (its ring and slack left as they are: zero).
+// Grid (c, 2w, 2h) over the source's w x h.
+kernel void upsample2x_pad(device const half* x [[buffer(0)]], device half* y [[buffer(1)]],
+                           constant PadArgs& a [[buffer(2)]], uint3 gid [[thread_position_in_grid]])
+{
+    const uint ch = gid.x, ox = gid.y, oy = gid.z, w = a.pw - 2, h = a.ph - 2;
+    if (ch >= a.n || ox >= 2 * w || oy >= 2 * h)
+        return;
+    y[(uint64_t(oy + 1) * (2 * w + 2) + ox + 1) * a.n + ch] = x[(uint64_t(oy / 2 + 1) * a.pw + ox / 2 + 1) * a.n + ch];
 }

@@ -179,9 +179,10 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   (no provenance chunks). A generation's `upscale` (a name, or `{"model": NAME, "scale": F}`) upscales its images
   before they are encoded; the PNG records it (`Hires upscale`, `Hires upscaler`; `mako`'s `upscale`). The result is
   at most 4096x4096 pixels' area. The weights run as F16 (0.8-2.2e-4 off PyTorch's fp32 output on a 48x32 crop);
-  images over 1024 pixels a side run in 1024-pixel tiles with 32 of context. 1024x768 at 4x takes 5.9 s (ComfyUI's
-  MPS path 3.1 s; docs/architecture.md says why). Loaded upscalers stay in memory (33 MB each); their scratch
-  buffers (about 8 GB for 1024x768 at 4x) are freed after each image. `mako_upscale MODEL.safetensors IMAGE [-o
+  images over 1024 pixels a side run in 1024-pixel tiles with 32 of context. 1024x768 at 4x takes 1.1 s with the
+  23-block models and 0.5 s with the 6-block one (ComfyUI's MPS path 3.1 s and 1.5 s; the convolutions read the image
+  through shifted views instead of unfolding it, docs/architecture.md). Loaded upscalers stay in memory (33 MB
+  each); their scratch buffers (about 11 GB for 1024x768 at 4x) are freed after each image. `mako_upscale MODEL.safetensors IMAGE [-o
   out.png] [--scale F] [--tile N] [--overlap N]` does the same from the command line, `mako_image --upscale
   FILE[:SCALE]` after a generation, the skill's `render.sh --upscale NAME[:SCALE]` through the server
   (`scripts/upscalers.sh` lists them).

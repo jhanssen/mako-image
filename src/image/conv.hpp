@@ -14,8 +14,8 @@ namespace mako::image {
 std::vector<float> read_floats(const safetensors::File& f, const gguf::Tensor& t);
 
 // What the image models' convolutions share: 3x3 and 1x1 convolutions as GEMMs over channels-last images
-// ([height][width][channels], a pixel a row) with F16 weights, and their loading. Engine (the VAEs) and Esrgan derive
-// from it.
+// ([height][width][channels], a pixel a row) with F16 weights, and their loading. Engine (the VAEs) derives from it;
+// Esrgan too, for the weight helpers (its own convolutions are in esrgan.cpp).
 class ConvRuntime : public gpu::Runtime {
 protected:
     ConvRuntime(mtl::Context& ctx, gpu::Telemetry telemetry) : gpu::Runtime(ctx, telemetry) {}
@@ -30,17 +30,7 @@ protected:
     // `name`.weight and .bias (F32, F16 or BF16): a convolution (or a linear layer, as a 1x1), or several of one
     // input's with their outputs side by side.
     Conv load_conv(const safetensors::Files& files, std::span<const std::string> names, uint32_t k);
-    // Where a 3x3 convolution of stride 1 reads and writes when its images are channel slices of wider rows: x's
-    // pixels ldx values apart (0: cin), y's ldy apart (0: cout) from y_off bytes in; and the LeakyReLU slope applied
-    // after the bias (1: none).
-    struct Layout {
-        uint32_t ldx = 0, ldy = 0;
-        uint64_t y_off = 0;
-        float slope = 1.0f;
-    };
     // y = conv(x) over an h x w image (with stride 2, a 3x3 to h / 2 x w / 2).
-    void conv(MTL::ComputeCommandEncoder*& enc, const Conv& c, MTL::Buffer* x, uint32_t h, uint32_t w, MTL::Buffer* y,
-              const Layout& l);
     void conv(MTL::ComputeCommandEncoder*& enc, const Conv& c, MTL::Buffer* x, uint32_t h, uint32_t w, MTL::Buffer* y);
     // y[r][i] += b[i] over rows of n.
     void bias(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* y, const Tensor& b, uint32_t n, uint32_t rows,

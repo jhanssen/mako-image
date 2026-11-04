@@ -108,12 +108,17 @@ came out a few percent off.
 ### ESRGAN upscalers
 
 `image::Esrgan` runs RRDBNet (the original ESRGAN's and Real-ESRGAN's, from a safetensors in Real-ESRGAN's names that
-`tools/esrgan_to_safetensors.py` makes of a checkpoint) on `image::ConvRuntime`, the convolutions the VAEs use: each
-3x3 unfolded (im2col) to half rows of cin * 9 and multiplied by F16 weights on the dense GEMM, over channels-last
-images. A dense block's five convolutions write into one wide buffer [pixels][nf + 4 gc] (the GEMM's row stride and
-offset put each output after the block's input and the earlier outputs), so each reads its concatenated input without
-a copy; bias and LeakyReLU are one kernel. The residuals are scale_add with a vector of 0.2; the nearest 2x
-upsampling is the VAE's. Images past 1024 pixels a side run in tiles with 32 pixels of context. Against PyTorch's
-fp32 output the F16 path is 1-2e-4 off on a 48x32 crop. The time (5.9 s for 1024x768 at 4x; ComfyUI on MPS 3.1 s) is
-the unfolded copies: the dense convolutions write and read about 600 GB of them for that image, where a convolution
-that unfolds inside the GEMM's tiles would read the image once.
+`tools/esrgan_to_safetensors.py` makes of a checkpoint) over channels-last half images with a zero ring (a padded
+row above and below, a pixel left and right) and zero slack rows before and after. Its 3x3 convolutions do not unfold
+the image: `conv3x3_dense` (image.metal) runs the dense GEMM's cooperative matmul over nine views of the image
+shifted by whole pixels, one per tap, accumulating into one tile, with the weights laid out [9][cout][cin] (cin
+rounded up to 64 with zero weights); the ring's own outputs are garbage that the bias kernel zeroes, so the next
+convolution's taps read zeros past the edges. A dense block's five convolutions share one wide buffer
+[pixels][nf + 4 gc]: the block's input in the first columns, each output written after it by the bias + LeakyReLU
+kernel (float in, half out), so each reads its concatenated input in place; a convolution of 96 or 160 channels reads
+up to 128 or 192, the extra columns holding the earlier run's finite values against zero weights. The residuals are
+scale_add with a vector of 0.2; the upsampling stage doubles each level by nearest into the next level's padded
+image. Images past 1024 pixels a side run in tiles with 32 pixels of context. Against PyTorch's fp32 output the F16
+path is 1-2e-4 off on a 48x32 crop. 1024x768 at 4x: 1.0 s on the GPU with 23 blocks, 0.3 s with 6 (ComfyUI on MPS 3.1
+and 1.5 s); unfolding the image (im2col to half rows, the VAEs' path in `image::ConvRuntime`) took 5.9 s, its copies
+about 600 GB of traffic, and 32-wide output tiles for the 32-channel convolutions beat 64-wide ones by 15 %.
