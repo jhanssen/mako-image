@@ -163,6 +163,8 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   tags up in Danbooru's tag list and checks the prompt's (`scripts/tags.py`; the list as a1111-sd-webui-tagcomplete ships it, `name,category,posts,"aliases"`, at
   `~/models/tags/danbooru.csv` or `MAKO_TAGS_CSV`). Its script saves to `~/Pictures/mako` (`MAKO_IMAGE_DIR`) and opens
   the image; `MAKO_IMAGE_URL` (default `http://127.0.0.1:8082/v1`) and `MAKO_IMAGE_API_KEY` point it at the server.
+  The scene-3d skill (a repository of its own) builds a control model's maps from a 3D blockout of the scene in
+  Blender and renders through this skill.
 - Control (MOSS-Image, a model directory with `"control"`, a colour/depth control adapter such as
   darask0/MOSS-Image-color-depth-control): `control` in a request, `{"color": BASE64, "depth": BASE64, "color_end": F,
   "depth_end": F}`: a colour region map (a flat colour per subject) and a depth map (near white), each steering the

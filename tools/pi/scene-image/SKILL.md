@@ -268,3 +268,9 @@ API key (`MAKO_IMAGE_API_KEY`), or may not have a model or LoRA of that name (li
 "borrowing memory:" means the image server, started with `--llm URL` to share the Mac with mako_serve, could not
 reach mako_serve there (not running, another port, or it wants `--llm-api-key`); the user fixes that where the image
 server is started.
+
+## Control maps from a 3D scene
+
+When a pose or the placement of several subjects matters more than a prompt can say, the scene-3d skill (its own
+repository, installed beside this one) builds the control maps from a blockout of the scene in Blender and renders
+through this skill's `render.sh --layout`, taking its options.
