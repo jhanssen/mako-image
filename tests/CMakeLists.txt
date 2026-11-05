@@ -53,10 +53,6 @@ target_link_libraries(esrgan_test PRIVATE mako_imagegen glaze_headers)
 add_test(NAME esrgan COMMAND esrgan_test "${MAKO_UPSCALERS}" "${MAKO_ESRGAN_REF}")
 set_tests_properties(esrgan PROPERTIES LABELS image SKIP_RETURN_CODE 77)
 
-# The model in memory against a lender on loopback (a stand-in model; no GPU).
-add_executable(residency_test residency_test.cpp)
-target_link_libraries(residency_test PRIVATE mako_image_server httplib_headers)
-add_test(NAME residency COMMAND residency_test)
 # The HTTP server's checks and errors, without a model.
 add_executable(image_server_test image_server_test.cpp)
 target_link_libraries(image_server_test PRIVATE mako_image_server httplib_headers)
@@ -65,7 +61,7 @@ add_test(NAME image_server COMMAND image_server_test)
 add_executable(image_models_test image_models_test.cpp)
 target_link_libraries(image_models_test PRIVATE mako_image_server glaze_headers)
 add_test(NAME image_models COMMAND image_models_test)
-set_tests_properties(residency image_server image_models PROPERTIES LABELS cpu)
+set_tests_properties(image_server image_models PROPERTIES LABELS cpu)
 # The ER-SDE sampler over a made-up model against the reference sampler's numbers.
 add_executable(er_sde_test er_sde_test.cpp ${PROJECT_SOURCE_DIR}/src/image/er_sde.cpp)
 target_include_directories(er_sde_test PRIVATE ${PROJECT_SOURCE_DIR}/src)

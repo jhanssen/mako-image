@@ -2,8 +2,8 @@
 
 #include "image/engine.hpp"
 #include "image/esrgan.hpp"
+#include "memory/residency.hpp"
 #include "server/image_models.hpp"
-#include "server/residency.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -13,7 +13,7 @@
 
 namespace mako::server {
 
-using ImageResidency = Residency<image::Engine>;
+using ImageResidency = memory::Residency<image::Engine>;
 // Loads a model with LoRAs merged.
 using LoadImage = std::function<std::unique_ptr<image::Engine>(const ImageModel&, const image::Loras&)>;
 // Loads an ESRGAN upscaler from its file.
