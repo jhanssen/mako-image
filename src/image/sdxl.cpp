@@ -461,7 +461,7 @@ void Sdxl::attend64(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* q, MTL::Buffe
 {
     const uint32_t q_pad = round_up(n_q, kQRows), k_pad = round_up(n_k, 128);
     const AttnArgs a{n_q, q_pad, n_k, k_pad, n_heads, n_heads, 0, block, n_heads * kD, 1.0f / std::sqrt(float(kD))};
-    dispatch(enc, "flash_attn_sg_64_16x32_4", {q, k, v, o}, &a, sizeof(a), MTL::Size(q_pad / kQRows, n_heads, 1),
+    dispatch(enc, "flash_attn_coop_64_32", {q, k, v, o}, &a, sizeof(a), MTL::Size(q_pad / kQRows, n_heads, 1),
              MTL::Size(128, 1, 1), false);
 }
 

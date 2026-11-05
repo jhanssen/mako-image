@@ -359,7 +359,7 @@ void Anima::begin(std::span<const float> prompt, uint32_t h, uint32_t w, uint32_
     };
     auto attend = [&](uint32_t nk, uint32_t k_pad) {
         const AttnArgs a{M, mq_pad, nk, k_pad, H, H, 0, 0, H * D, 1.0f / std::sqrt(float(D))};
-        dispatch(enc, "flash_attn_sg_64_16x32_4", {qh, kh, vh, att}, &a, sizeof(a), MTL::Size(mq_pad / kAttnRows, H, 1),
+        dispatch(enc, "flash_attn_coop_64_32", {qh, kh, vh, att}, &a, sizeof(a), MTL::Size(mq_pad / kAttnRows, H, 1),
                  MTL::Size(128, 1, 1), false);
     };
     for (const AdapterBlock& A : adapter_) {
