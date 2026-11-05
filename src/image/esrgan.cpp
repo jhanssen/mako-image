@@ -7,6 +7,8 @@
 
 namespace mako::image {
 
+using models::read_floats;
+
 namespace {
 
 constexpr float kSlope = 0.2f;    // LeakyReLU's negative slope
@@ -24,7 +26,7 @@ struct PadArgs {
 } // namespace
 
 Esrgan::Esrgan(const std::string& path, mtl::Context& ctx, gpu::Telemetry telemetry)
-    : ConvRuntime(ctx, telemetry), path_(path)
+    : models::ConvRuntime(ctx, telemetry), path_(path)
 {
     auto files = safetensors::Files::open(path);
     if (!files)

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "image/conv.hpp"
+#include "models/conv.hpp"
 #include "image/png.hpp"
 #include "models/qwen_text.hpp"
 #include "safetensors/safetensors.hpp"
@@ -17,6 +17,8 @@
 #include <vector>
 
 namespace mako::image {
+
+using models::read_floats;
 
 struct Options {
     std::string text_encoder; // another directory of the text encoder's safetensors (the same model's, changed)
@@ -52,7 +54,7 @@ const char* sampler_name(Sampler s);
 // An image model from its original files (a directory with model_index.json, text_encoder/, transformer/, vae/,
 // scheduler/): the parts the models share, the Qwen3-VL text encoder, the VAE decoder, the flow-matching schedule and
 // the denoising loop. QwenImage and Krea2 add their diffusion transformers; open() picks one from model_index.json.
-class Engine : public ConvRuntime {
+class Engine : public models::ConvRuntime {
 public:
     // The model in `dir`, by the pipeline model_index.json names. Throws on a model it does not know.
     static std::unique_ptr<Engine> open(const std::string& dir, mtl::Context& ctx, const Options& opts = {});
@@ -185,9 +187,6 @@ protected:
     void load_vae_ldm(const std::string& file, const std::string& prefix, float scale);
 
     using ConvRuntime::load_conv;
-    // Group norm (32 groups) times g plus b over channels-last images, then SiLU when silu is set.
-    void group_norm(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, const Tensor& g, const Tensor& b, MTL::Buffer* y,
-                    uint32_t rows, uint32_t c, bool silu, float eps = 1e-6f);
 
     // Which matrix a LoRA module adapts (models::TransformerRuntime): every family names its own.
     LoraTarget lora_target(const std::string& module) override = 0;

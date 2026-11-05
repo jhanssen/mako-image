@@ -1,6 +1,6 @@
 #pragma once
 
-#include "image/conv.hpp"
+#include "models/conv.hpp"
 
 #include <cstdint>
 #include <span>
@@ -17,7 +17,7 @@ namespace mako::image {
 // conv_body, conv_upN, conv_hr, conv_last; tools/esrgan_to_safetensors.py converts the .pth checkpoints, renaming
 // the original ESRGAN's layers), F32, F16 or BF16; the weights run as F16. The convolutions read padded half images
 // through nine shifted views (conv3x3_dense in image.metal), without unfolding them.
-class Esrgan : public ConvRuntime {
+class Esrgan : public models::ConvRuntime {
 public:
     // Throws std::runtime_error on a file it cannot use.
     Esrgan(const std::string& path, mtl::Context& ctx, gpu::Telemetry telemetry = gpu::Telemetry::off);

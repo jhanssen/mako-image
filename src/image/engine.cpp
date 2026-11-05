@@ -205,7 +205,7 @@ Engine::Engine(const std::string& dir, mtl::Context& ctx, const Options& opts)
 }
 
 Engine::Engine(const Parts& parts, mtl::Context& ctx, const Options& opts)
-    : ConvRuntime(ctx, opts.telemetry), vae_files_(open_files(parts.vae))
+    : models::ConvRuntime(ctx, opts.telemetry), vae_files_(open_files(parts.vae))
 {
     text_ = std::make_unique<models::QwenText>(parts.text_encoder, ctx, opts.telemetry,
                                                models::QwenText::Options{.theta = parts.text_theta});
@@ -274,7 +274,7 @@ Engine::Engine(const Parts& parts, mtl::Context& ctx, const Options& opts)
     tok_ = std::move(*t);
 }
 
-Engine::Engine(mtl::Context& ctx, const Options& opts) : ConvRuntime(ctx, opts.telemetry) {}
+Engine::Engine(mtl::Context& ctx, const Options& opts) : models::ConvRuntime(ctx, opts.telemetry) {}
 
 void Engine::load_vae_ldm(const std::string& file, const std::string& prefix, float scale)
 {
@@ -660,30 +660,6 @@ void Engine::load_vae_kl()
     out_g_ = vec("decoder.conv_norm_out.weight");
     out_b_ = vec("decoder.conv_norm_out.bias");
     conv_out_ = load_conv("decoder.conv_out", 3);
-}
-
-void Engine::group_norm(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, const Tensor& g, const Tensor& b,
-                        MTL::Buffer* y, uint32_t rows, uint32_t c, bool silu, float eps)
-{
-    struct {
-        uint32_t rows, c, groups, chunk;
-        float eps;
-        uint32_t silu;
-    } a{rows, c, 32, 256, eps, silu ? 1u : 0u};
-    const uint32_t chunks = (rows + a.chunk - 1) / a.chunk;
-    MTL::Buffer* part = scratch("gn_part", uint64_t(chunks) * c * 8);
-    MTL::Buffer* stats = scratch("gn_stats", 32 * 8);
-    dispatch(enc, "gn_partial", {x, part}, &a, sizeof(a), MTL::Size(c, chunks, 1), MTL::Size(std::min(c, 256u), 1, 1));
-    dispatch(enc, "gn_stats", {part, stats}, &a, sizeof(a), MTL::Size(32, 1, 1), MTL::Size(32, 1, 1));
-    enc->setComputePipelineState(pso("gn_apply"));
-    enc->setBuffer(x, 0, 0);
-    enc->setBuffer(stats, 0, 1);
-    enc->setBuffer(g.buf, g.off, 2);
-    enc->setBuffer(b.buf, b.off, 3);
-    enc->setBuffer(y, 0, 4);
-    enc->setBytes(&a, sizeof(a), 5);
-    enc->dispatchThreads(MTL::Size(c, rows, 1), MTL::Size(std::min(c, 256u), 1, 1));
-    after(enc, "gn_apply");
 }
 
 void Engine::norm_silu(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, const Tensor& g, MTL::Buffer* y,
