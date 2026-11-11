@@ -223,9 +223,13 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   fit together with room there (the rule: 1.35 x their files against the machine's memory), so they take turns: the
   text encoder is freed when the transformer loads and loaded again for the next prompt, the transformer freed
   then, about 115 GB read from the SSD per request. The prompt goes in verbatim (no template; a long
-  English description of the whole image works best, as the model's prompt expander writes them; the first 4096
-  tokens). Its own schedule: six Euler steps on a fixed sigma grid, each step through its own output head, no
-  guidance; LoRAs merge into the transformer (none tried).
+  English description of the whole image works best, as the model's prompt expander writes them: every hard fact
+  kept, required text placed and quoted, camera, lighting and each body's orientation stated, about 250 words for
+  a scene; an edit as the expander's three parts, each kept source element defined as `<Subject N>` from its
+  `<Picture N>`, then `The target image shows ...` with one preservation clause per subject, then only what
+  changes; the first 4096 tokens; up to 16 references by the card). Its own schedule: six Euler steps on a sigma
+  grid, each through its own output head, other counts interpolating the grid, no guidance; LoRAs merge into the
+  transformer (none tried; the video model's load but its weights sit 30-45% away from this model's).
 - Not yet: `/v1/images/edits` (MiniMax-H3-Image's references go through `references` of a generation), condition
   images for the other models, and image to image for the other models (their VAEs' encoders).
 
