@@ -112,8 +112,6 @@ Sdxl::Sdxl(const std::string& dir, mtl::Context& ctx, const Options& opts)
     : Engine(ctx, opts), files_(open_files(opts.transformer.empty() ? checkpoint(dir) : opts.transformer))
 {
     dir_ = dir;
-    // F16 matrices have only the GEMM, so the embeddings' single rows take it too.
-    gemm_min_tokens_ = 1;
     const std::string ckpt = opts.transformer.empty() ? checkpoint(dir) : opts.transformer;
     const fs::path tdir = fs::path(dir) / "tokenizer";
     if (!fs::exists(tdir / "vocab.json") || !fs::exists(tdir / "merges.txt"))
@@ -150,14 +148,7 @@ std::optional<std::string> Sdxl::default_negative() const
 
 Engine::Tensor Sdxl::matrix(const std::string& name)
 {
-    const auto r = files_.find(name);
-    if (!r || r.tensor->dims.size() != 2)
-        throw std::runtime_error("missing matrix " + name);
-    if (r.tensor->type != gguf::Type::F16)
-        return upload(files_, name, true);
-    Tensor t = reserve(r.tensor->bytes, gguf::Type::F16, r.tensor->dims);
-    gguf::read_exact(r.file->fd(), static_cast<char*>(t.buf->contents()) + t.off, r.tensor->bytes, r.tensor->offset);
-    return t;
+    return Engine::matrix(files_, name);
 }
 
 void Sdxl::load_clip(int which)

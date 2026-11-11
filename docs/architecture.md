@@ -39,7 +39,9 @@ came out a few percent off.
   (plain scales) modulated by one timestep vector shared by every block (shift, scale, gate for attention and the
   FFN), an FFN of 8192 with a bounded gated activation (4 tanh(g / 4) sigmoid(g) x 25 tanh(h / 25)), rotary positions
   on four axes of 16 frequencies each (the image centred, after the text's length on the second axis; the text along
-  that axis), half-split rotation.
+  that axis), half-split rotation. Its weights from the model directory or a single-file checkpoint
+  (`--transformer`, e.g. a fine-tune): q, k and v as one `proj.qkv` matrix or three, F16 matrices kept as stored (on
+  the GEMM, as SDXL's).
 - Text: Qwen3.5-9B's last hidden state (after its final norm) of the chat-templated prompt with thinking opened.
   The encoder alternates three gated delta rule layers (a causal depthwise convolution over q / k / v, l2-normed
   q and k, a per-head decay, a 128 x 128 state per value head; GLM's delta rule scan runs it with the decay on every

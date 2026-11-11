@@ -370,7 +370,8 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
         guidance = float(body["guidance_scale"].get_number());
     }
     std::optional<image::Sampler> sampler = model.sampler;
-    if (body.contains("sampler") && !body["sampler"].is_null()) {
+    const bool asked_sampler = body.contains("sampler") && !body["sampler"].is_null();
+    if (asked_sampler) {
         sampler = body["sampler"].is_string() ? image::parse_sampler(body["sampler"].get_string()) : std::nullopt;
         if (!sampler)
             return fail(400, "sampler must be euler, euler_a or er_sde", "invalid_request_error");
@@ -516,8 +517,9 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
         lora_names += std::format("{}{} {:g}{}", lora_names.empty() ? ", LoRAs " : ", ",
                                   std::filesystem::path(l.path).stem().string(), l.scale,
                                   !l.merge ? "" : *l.merge ? " merged" : " unmerged");
-    log::info("{}: {} image{} {}x{} with {}{}{}{}, waiting for the image model", id, n, n > 1 ? "s" : "", width,
+    log::info("{}: {} image{} {}x{} with {}{}{}{}{}, waiting for the image model", id, n, n > 1 ? "s" : "", width,
               height, model.name, negative ? ", a negative prompt" : "", lora_names,
+              asked_sampler ? std::format(", sampler {}", image::sampler_name(*sampler)) : "",
               start.empty() ? "" : std::format(", from an image (strength {:g})", strength));
     std::string data = "[";
     uint32_t out_w = width, out_h = height; // the images' size (upscaled, if asked)

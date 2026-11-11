@@ -276,6 +276,18 @@ Engine::Engine(const Parts& parts, mtl::Context& ctx, const Options& opts)
 
 Engine::Engine(mtl::Context& ctx, const Options& opts) : models::ConvRuntime(ctx, opts.telemetry) {}
 
+Engine::Tensor Engine::matrix(const safetensors::Files& files, const std::string& name)
+{
+    const auto r = files.find(name);
+    if (!r || r.tensor->dims.size() != 2)
+        throw std::runtime_error("missing matrix " + name);
+    if (r.tensor->type != gguf::Type::F16)
+        return upload(files, name, true);
+    Tensor t = reserve(r.tensor->bytes, gguf::Type::F16, r.tensor->dims);
+    gguf::read_exact(r.file->fd(), static_cast<char*>(t.buf->contents()) + t.off, r.tensor->bytes, r.tensor->offset);
+    return t;
+}
+
 void Engine::load_vae_ldm(const std::string& file, const std::string& prefix, float scale)
 {
     vae_files_ = open_files(file);

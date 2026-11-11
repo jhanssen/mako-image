@@ -188,6 +188,9 @@ protected:
 
     using ConvRuntime::load_conv;
 
+    // A matrix: F16 kept as stored (upload() refuses it: the GEMV has no F16 kernel, the GEMM runs it), else upload().
+    Tensor matrix(const safetensors::Files& files, const std::string& name);
+
     // Which matrix a LoRA module adapts (models::TransformerRuntime): every family names its own.
     LoraTarget lora_target(const std::string& module) override = 0;
     // A data-space sampler (an adapter's): each step runs the model on z + Q x0 at the next code's timestep and takes

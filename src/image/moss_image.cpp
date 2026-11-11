@@ -83,8 +83,8 @@ void MossImage::load_transformer(const safetensors::Files& f)
 {
     if (!f.find("video_embedder.weight") || !f.find("shared_block_modulation.weight"))
         throw std::runtime_error("transformer: not MOSS-Image's weights");
-    auto mat = [&](const std::string& n) { return upload(f, n, true); };
-    auto vec = [&](const std::string& n) { return upload(f, n, false); };
+    auto mat = [&](const std::string& n) { return matrix(f, n); };
+    auto vec = [&](const std::string& n) { return upload_f32(f, n); };
     // Biases of fused matrices, one after another.
     auto biases = [&](std::initializer_list<std::string> names) {
         std::vector<float> all;
@@ -127,11 +127,18 @@ void MossImage::load_transformer(const safetensors::Files& f)
     mod_b_ = vec("shared_block_modulation.bias");
     head_mod_ = mat("video_head_modulation.weight");
     head_mod_b_ = vec("video_head_modulation.bias");
-    for (uint32_t i = 0; f.find(std::format("layers.{}.proj.q.weight", i)); ++i) {
+    for (uint32_t i = 0;; ++i) {
         const std::string b = std::format("layers.{}.", i);
+        // q, k and v as one matrix (single-file checkpoints) or three.
+        std::vector<std::string> qkv = {b + "proj.qkv.weight"};
+        if (!f.find(qkv[0]))
+            qkv = {b + "proj.q.weight", b + "proj.k.weight", b + "proj.v.weight"};
+        if (!f.find(qkv[0]))
+            break;
         Block B;
-        const std::string qkv[3] = {b + "proj.q.weight", b + "proj.k.weight", b + "proj.v.weight"};
         B.q = upload_rows(f, qkv);
+        if (B.q.dims[0] != kDim || B.q.dims[1] != 3 * kDim)
+            throw std::runtime_error(std::format("transformer: {}proj.qkv is not [{}][{}]", b, 3 * kDim, kDim));
         B.o = mat(b + "proj.o.weight");
         B.norm_q = vec(b + "q_norm.weight");
         B.norm_k = vec(b + "k_norm.weight");
