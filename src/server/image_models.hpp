@@ -12,7 +12,8 @@ namespace mako::server {
 
 // An image model as a directory: its files (the directory, or where its mako.json points) and the settings mako.json
 // gives. mako.json (every field optional, paths relative to its directory):
-//   {"model": DIR, "transformer": PATH, "text_encoder": PATH, "adapter": DIR, "control": FILE, "lora_dir": DIR,
+//   {"model": DIR, "transformer": PATH, "text_encoder": PATH, "vae": PATH, "adapter": DIR, "control": FILE,
+//    "lora_dir": DIR, "min_area": N,
 //    "loras": {NAME: SCALE or {"scale": SCALE, "merge": BOOL}, ...}, "steps": N, "terminal": F, "guidance": F, "sampler": "euler" | "euler_a" | "er_sde", "skip_blocks": [N, ...],
 //    "description": TEXT, "prompting": TEXT}
 // LoRAs are named by file name without .safetensors, from lora_dir (default: the directory's loras/); "loras" are the
@@ -28,11 +29,12 @@ struct ImageModel {
     std::optional<float> terminal, guidance;
     std::optional<image::Sampler> sampler; // unset: the model's
     std::optional<std::vector<uint32_t>> skip_blocks; // the negative prompt's pass's; unset: the model's
+    std::optional<uint32_t> min_area; // the smallest canvas in pixels (models that generate larger); unset: the model's
     // What decides the loaded weights besides LoRAs: two models with the same key load the same.
     std::string key() const
     {
-        return dir + "|" + options.text_encoder + "|" + options.transformer + "|" + options.adapter + "|" +
-               options.control;
+        return dir + "|" + options.text_encoder + "|" + options.transformer + "|" + options.vae + "|" +
+               options.adapter + "|" + options.control;
     }
 };
 

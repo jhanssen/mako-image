@@ -2,6 +2,7 @@
 
 #include "image/anima.hpp"
 #include "image/er_sde.hpp"
+#include "image/h3_image.hpp"
 
 #include "log/log.hpp"
 #include "gguf/read_pool.hpp"
@@ -158,7 +159,8 @@ std::string Engine::family(const std::string& dir)
         return cls == "QwenImage21Pipeline" ? "Qwen-Image 2.1"
                : cls == "Krea2Pipeline"     ? "Krea 2"
                : cls == "MOSSImagePipeline" ? "MOSS-Image"
-                                            : "";
+               : cls == "MiniMaxH3ImagePipeline" ? "MiniMax-H3-Image"
+                                                  : "";
     } catch (const std::exception&) {
         return "";
     }
@@ -180,6 +182,8 @@ std::unique_ptr<Engine> Engine::open(const std::string& dir, mtl::Context& ctx, 
         return std::make_unique<Krea2>(dir, ctx, opts);
     if (cls == "MOSSImagePipeline")
         return std::make_unique<MossImage>(dir, ctx, opts);
+    if (cls == "MiniMaxH3ImagePipeline")
+        return std::make_unique<H3Image>(dir, ctx, opts);
     if (!opts.adapter.empty())
         throw std::runtime_error(std::format("{}: adapters are for MOSS-Image", dir));
     if (!opts.control.empty())
@@ -207,8 +211,7 @@ Engine::Engine(const std::string& dir, mtl::Context& ctx, const Options& opts)
 Engine::Engine(const Parts& parts, mtl::Context& ctx, const Options& opts)
     : models::ConvRuntime(ctx, opts.telemetry), vae_files_(open_files(parts.vae))
 {
-    text_ = std::make_unique<models::QwenText>(parts.text_encoder, ctx, opts.telemetry,
-                                               models::QwenText::Options{.theta = parts.text_theta});
+    load_text(parts.text_encoder, models::QwenText::Options{.theta = parts.text_theta, .layers = parts.text_layers});
 
     wan_ = vae_files_.find("decoder.conv1.weight") && !vae_files_.find("decoder.conv_in.weight");
     const std::string vcfg = parts.vae + "/config.json";
@@ -268,13 +271,23 @@ Engine::Engine(const Parts& parts, mtl::Context& ctx, const Options& opts)
     num("max_shift", sched_.max_shift);
     num("shift_terminal", sched_.terminal);
 
-    auto t = text::Tokenizer::load_json(parts.tokenizer);
+    load_tokenizer(parts.tokenizer);
+}
+
+Engine::Engine(mtl::Context& ctx, const Options& opts) : models::ConvRuntime(ctx, opts.telemetry) {}
+
+void Engine::load_text(const std::string& dir, const models::QwenText::Options& opts)
+{
+    text_ = std::make_unique<models::QwenText>(dir, ctx_, tel_, opts);
+}
+
+void Engine::load_tokenizer(const std::string& path)
+{
+    auto t = text::Tokenizer::load_json(path);
     if (!t)
         throw std::runtime_error(t.error());
     tok_ = std::move(*t);
 }
-
-Engine::Engine(mtl::Context& ctx, const Options& opts) : models::ConvRuntime(ctx, opts.telemetry) {}
 
 Engine::Tensor Engine::matrix(const safetensors::Files& files, const std::string& name)
 {
@@ -306,7 +319,17 @@ void Engine::load_vae_ldm(const std::string& file, const std::string& prefix, fl
 std::vector<float> Engine::encode_text(std::span<const int32_t> ids, uint32_t drop, std::span<const uint32_t> taps,
                                        bool normed)
 {
+    if (!text_)
+        throw std::runtime_error(std::format("{}: the text encoder is not loaded", name()));
     return text_->encode(ids, drop, taps, normed);
+}
+
+std::vector<float> Engine::encode_text(std::span<const int32_t> ids, uint32_t drop, std::span<const uint32_t> taps,
+                                       bool normed, std::span<const models::QwenText::Vision> vision)
+{
+    if (!text_)
+        throw std::runtime_error(std::format("{}: the text encoder is not loaded", name()));
+    return text_->encode(ids, drop, taps, normed, vision);
 }
 
 double Engine::shift_mu(uint32_t tokens) const
@@ -345,7 +368,14 @@ std::vector<float> Engine::generate(const Request& r)
 {
     if (r.width % 32 || r.height % 32 || !r.width || !r.height)
         throw std::runtime_error("width and height must be multiples of 32");
-    const uint32_t h = r.height / 16, w = r.width / 16, N = h * w;
+    const auto [cw, ch] = canvas(r.width, r.height, r.min_area);
+    if (cw % 32 || ch % 32 || !cw || !ch)
+        throw std::logic_error("the canvas must be multiples of 32");
+    const uint32_t h = ch / 16, w = cw / 16, N = h * w;
+    // Generated on a larger canvas: resampled to the size asked for.
+    auto sized = [&](std::vector<float> img) {
+        return cw == r.width && ch == r.height ? img : resize_image(img, cw, ch, r.width, r.height);
+    };
     const DataSpace* ds = data_space();
     if (ds && r.sampler)
         throw std::runtime_error(std::format("{}: the adapter has its own sampler", name()));
@@ -363,6 +393,7 @@ std::vector<float> Engine::generate(const Request& r)
         throw std::runtime_error(std::format("{}: Euler a needs a model that predicts the noise", name()));
     const auto skip = r.skip_blocks.value_or(default_skip_blocks());
     set_skip_blocks(skip);
+    set_references(r);
     const auto prompt = prompt_embeddings(r.prompt);
     std::vector<float> x(uint64_t(N) * lat_);
     std::mt19937_64 rng(r.seed);
@@ -396,7 +427,7 @@ std::vector<float> Engine::generate(const Request& r)
             if (r.progress)
                 r.progress(i + 1, steps);
         }
-        return decode(x0, h, w);
+        return sized(decode(x0, h, w));
     }
     auto sig = sigmas(r.steps ? r.steps : default_steps(), N, r.terminal);
     if (!r.image.empty()) {
@@ -473,7 +504,7 @@ std::vector<float> Engine::generate(const Request& r)
         if (r.progress)
             r.progress(i + 1, steps);
     }
-    return decode(x, h, w);
+    return sized(decode(x, h, w));
 }
 
 void Engine::set_control(std::vector<float>, std::vector<float>)
@@ -482,6 +513,17 @@ void Engine::set_control(std::vector<float>, std::vector<float>)
 }
 
 void Engine::control_on(bool, bool) {}
+
+void Engine::set_references(const Request& r)
+{
+    if (!r.references.empty())
+        throw std::runtime_error(std::format("{}: takes no reference images", name()));
+}
+
+std::pair<uint32_t, uint32_t> Engine::canvas(uint32_t width, uint32_t height, std::optional<uint32_t>) const
+{
+    return {width, height};
+}
 
 uint32_t Engine::start_step(uint32_t steps, float strength)
 {
@@ -502,6 +544,9 @@ Provenance Engine::provenance(const Request& r) const
         p.color_end = r.control.color_end;
     if (!r.control.depth.empty())
         p.depth_end = r.control.depth_end;
+    if (const auto c = canvas(r.width, r.height, r.min_area); c.first != r.width || c.second != r.height)
+        p.canvas = c;
+    p.references = uint32_t(r.references.size());
     if (!r.image.empty()) {
         // The share of the steps run, which the strength rounds to.
         const uint32_t all = uint32_t(sigmas(p.steps, (r.width / 16) * (r.height / 16), r.terminal).size() - 1);

@@ -14,6 +14,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace mako::image {
@@ -23,6 +24,7 @@ using models::read_floats;
 struct Options {
     std::string text_encoder; // another directory of the text encoder's safetensors (the same model's, changed)
     std::string transformer;  // another file or directory of the transformer's weights
+    std::string vae;          // another file of the VAE's weights (MiniMax-H3-Image: the ComfyUI repack's fp16 one)
     // A data-space distillation adapter's directory (MOSS-Image): lora.safetensors (kept unmerged),
     // time_embedding.safetensors (F32 time path) and dataspace.safetensors (its sampler).
     std::string adapter;
@@ -69,6 +71,18 @@ public:
     static bool encodes_images(const std::string& family) { return family == "MOSS-Image"; }
     // Whether the family takes a control adapter (Options::control).
     static bool takes_control(const std::string& family) { return family == "MOSS-Image"; }
+    // The step count of a family that samples on a fixed schedule (no other count, no terminal stretch, Euler
+    // only, no guidance); 0: any.
+    static uint32_t fixed_steps(const std::string& family) { return family == "MiniMax-H3-Image" ? 6 : 0; }
+    // Whether a family generates on a canvas of at least Request::min_area pixels and resizes to the size asked.
+    static bool generates_on_canvas(const std::string& family) { return family == "MiniMax-H3-Image"; }
+    // Whether a family takes reference images (Request::references).
+    static bool takes_references(const std::string& family) { return family == "MiniMax-H3-Image"; }
+    // The largest image a family makes, in pixels.
+    static uint64_t max_pixels(const std::string& family)
+    {
+        return family == "MiniMax-H3-Image" ? 6272ull * 2688 : 2048ull * 2048;
+    }
 
     virtual ~Engine() = default;
 
@@ -78,6 +92,7 @@ public:
     struct Parts {
         std::string text_encoder, vae, scheduler, tokenizer;
         float text_theta = 0;
+        uint32_t text_layers = 0; // keep only the text encoder's first layers (0: all)
     };
     const char* name() const override = 0;
     virtual uint32_t default_steps() const = 0;
@@ -118,6 +133,19 @@ public:
             std::span<const float> color, depth;
             float color_end = 1.0f, depth_end = 1.0f;
         } control;
+        // Reference images (families that take them): RGBA [height][width][4] in [-1, 1], any size; the prompt
+        // refers to them in order as <Picture 1>, <Picture 2>, ...
+        struct Reference {
+            uint32_t width = 0, height = 0;
+            std::span<const float> rgba;
+        };
+        std::vector<Reference> references;
+        // Instead of the seed's: per reference, the noise its posterior is sampled with and the noise mixed into
+        // its latents, [h / 16 * w / 16][24] each at the size the model encodes it.
+        std::vector<std::span<const float>> reference_noise;
+        // The smallest canvas, in pixels, a model that generates larger than asked uses (unset: the model's; 0:
+        // the size asked for).
+        std::optional<uint32_t> min_area;
         std::function<void(uint32_t step, uint32_t steps)> progress;
     };
     // Image to image: the first of `steps` steps to run at `strength` (the share run, rounded to whole steps; below 1
@@ -142,14 +170,17 @@ public:
     // [n - drop][taps][E].
     std::vector<float> encode_text(std::span<const int32_t> ids, uint32_t drop, std::span<const uint32_t> taps = {},
                                    bool normed = false);
+    // The same with images in the sequence (Qwen3-VL's vision blocks).
+    std::vector<float> encode_text(std::span<const int32_t> ids, uint32_t drop, std::span<const uint32_t> taps,
+                                   bool normed, std::span<const models::QwenText::Vision> vision);
     uint32_t text_width() const { return text_->width(); }
 
     // The VAE decoder: transformer latents [h * w][latent_width()] (normalized) to RGBA [16h][16w][4] in [-1, 1].
-    std::vector<float> decode(std::span<const float> latents, uint32_t h, uint32_t w);
+    virtual std::vector<float> decode(std::span<const float> latents, uint32_t h, uint32_t w);
     // The VAE encoder: RGBA [16h][16w][4] in [-1, 1] (alpha unused) to transformer latents [h * w][latent_width()]
     // (normalized), the posterior's mean. Its weights load with the first call. AutoencoderKL VAEs in Diffusers' names
     // only (MOSS-Image's); throws for the others.
-    std::vector<float> encode(std::span<const float> rgba, uint32_t h, uint32_t w);
+    virtual std::vector<float> encode(std::span<const float> rgba, uint32_t h, uint32_t w);
     // A transformer token's latent values: the VAE's channels times the pixels of its patch.
     uint32_t latent_width() const { return lat_; }
 
@@ -163,7 +194,7 @@ public:
 
     // A LoRA added for good (models::TransformerRuntime::add_lora); keeps_loras_unmerged() is the family's.
     using TransformerRuntime::add_lora;
-    uint32_t add_lora(const Lora& l) { return add_lora(l.path, l.scale, l.merge); }
+    virtual uint32_t add_lora(const Lora& l) { return add_lora(l.path, l.scale, l.merge); }
     // Whether a control adapter is loaded (Options::control).
     virtual bool has_control() const { return false; }
     const text::Tokenizer& tokenizer() const { return *tok_; }
@@ -173,6 +204,19 @@ protected:
     // the next steps see.
     virtual void set_control(std::vector<float> color, std::vector<float> depth);
     virtual void control_on(bool color, bool depth);
+    // The reference images of the next generation: none by default; a family that takes them keeps them for its
+    // prompt_embeddings() and begin().
+    virtual void set_references(const Request& r);
+    // The canvas an image of width x height is generated on: the size itself, unless the model generates larger
+    // and resizes.
+    virtual std::pair<uint32_t, uint32_t> canvas(uint32_t width, uint32_t height,
+                                                 std::optional<uint32_t> min_area) const;
+    // The text encoder from its directory and the tokenizer from its file, for models that load their own parts.
+    void load_text(const std::string& dir, const models::QwenText::Options& opts);
+    // Frees the text encoder's weights (a model that cannot hold it beside its transformer loads it again).
+    void free_text() { text_.reset(); }
+    bool has_text() const { return static_cast<bool>(text_); }
+    void load_tokenizer(const std::string& path);
     // Which blocks the negative prompt's pass leaves out from here on; throws on blocks the model does not have, or
     // any for a model that skips none.
     virtual void set_skip_blocks(std::span<const uint32_t> blocks);

@@ -45,11 +45,25 @@ void image_model_checks()
     fs::create_directories(root / "d" / "loras");
     std::ofstream(root / "d" / "loras" / "x.safetensors") << "x";
     std::ofstream(root / "d" / "mako.json") << R"({"model": "../a", "loras": {"x": {"merge": false}}})";
+    // MiniMax-H3-Image: a VAE file and a canvas area; a step count or a canvas area the family refuses.
+    fs::create_directories(root / "e");
+    std::ofstream(root / "e" / "model_index.json") << R"({"_class_name": "MiniMaxH3ImagePipeline"})";
+    std::ofstream(root / "e" / "vae.safetensors") << "v";
+    std::ofstream(root / "e" / "mako.json") << R"({"vae": "vae.safetensors", "min_area": 0})";
+    fs::create_directories(root / "f");
+    std::ofstream(root / "f" / "mako.json") << R"({"model": "../e", "steps": 4})";
+    fs::create_directories(root / "g");
+    std::ofstream(root / "g" / "mako.json") << R"({"model": "../a", "min_area": 1024})";
     const auto list = mako::server::image_models(root.string());
-    check(list.size() == 2 && list[0].name == "a" && list[1].name == "b",
+    check(list.size() == 3 && list[0].name == "a" && list[1].name == "b" && list[2].name == "e",
           "image models: the directories holding one, bad mako.json files (a missing LoRA, an unmerged LoRA for a model "
-          "that merges them) left out");
-    if (list.size() == 2) {
+          "that merges them, a step count on a fixed schedule, a canvas area on a model without one) left out");
+    if (list.size() == 3)
+        check(list[2].family == "MiniMax-H3-Image" && list[2].min_area == 0u &&
+                  list[2].options.vae == fs::absolute(root / "e" / "vae.safetensors").lexically_normal().string() &&
+                  list[2].key() != list[0].key(),
+              "mako.json: the VAE file and the canvas area of a MiniMax-H3-Image model");
+    if (list.size() == 3) {
         const auto& b = list[1];
         check(b.dir == fs::absolute(root / "a").lexically_normal().string() && b.steps == 4 && b.guidance == 1.5f &&
                   b.terminal == 0.0f && b.loras.size() == 2 && b.loras[0].scale == 0.5f && !b.loras[0].merge &&

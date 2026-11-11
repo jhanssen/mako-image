@@ -2,8 +2,8 @@
 # Renders an image with mako_image_serve's /v1/images/generations and saves it as a PNG.
 #   render.sh [--model NAME] [--lora NAME[:SCALE][:merge|:unmerged]]... [--no-loras] [--steps N] [--negative TEXT]
 #             [--guidance F] [--sampler NAME] [--skip-blocks LIST] [--seed N] [--image FILE [--strength F]]
-#             [--color-map FILE] [--depth-map FILE] [--color-end F] [--depth-end F] [--upscale NAME[:SCALE]]
-#             WIDTHxHEIGHT|auto "prompt"
+#             [--color-map FILE] [--depth-map FILE] [--color-end F] [--depth-end F] [--reference FILE]...
+#             [--min-area N] [--upscale NAME[:SCALE]] WIDTHxHEIGHT|auto "prompt"
 #   render.sh [options] --layout DRAFT     (MOSS-Image: a layout draft, see layout.py, as a file, - for standard input or
 #                                           the JSON itself; the size comes from the draft)
 # --model renders with that image model (default: the server's); --lora (repeatable) with these LoRAs in place of the
@@ -16,7 +16,10 @@
 # centred, --strength the share of the steps run on it (0 to 1, default 0.75: more changes more); size "auto" takes
 # the image's (at most 1024x1024 pixels' area). --color-map FILE (a flat colour per subject) and --depth-map FILE
 # (near white) steer the layout on a model with a control adapter, each for the first --color-end / --depth-end share
-# of the steps (0 to 1, default 1); a layout draft's color_map / depth_map are passed the same way. --upscale NAME
+# of the steps (0 to 1, default 1); a layout draft's color_map / depth_map are passed the same way. --reference FILE
+# (repeatable; MiniMax-H3-Image) gives a reference image the prompt names as <Picture 1>, <Picture 2>, ... in that
+# order; --min-area N the smallest canvas in pixels that model generates on (default the model's, 2048x2048; 0: the
+# size itself, faster and rougher). --upscale NAME
 # runs the server's ESRGAN upscaler NAME on the image (scripts/upscalers.sh lists them), to SCALE times the size
 # (default: the upscaler's own, 4 for most; the server resamples down from its output for less).
 # MAKO_IMAGE_URL (mako_image_serve; default http://127.0.0.1:8082/v1), MAKO_IMAGE_API_KEY (when the server wants
@@ -27,7 +30,8 @@ usage() {
     echo "usage: render.sh [--model NAME] [--lora NAME[:SCALE][:merge|:unmerged]]... [--no-loras] [--steps N]" >&2
     echo "                 [--negative TEXT] [--guidance F] [--sampler NAME] [--skip-blocks LIST] [--seed N]" >&2
     echo "                 [--image FILE [--strength F]] [--color-map FILE] [--depth-map FILE]" >&2
-    echo "                 [--color-end F] [--depth-end F] [--upscale NAME[:SCALE]] WIDTHxHEIGHT|auto \"prompt\"" >&2
+    echo "                 [--color-end F] [--depth-end F] [--reference FILE]... [--min-area N]" >&2
+    echo "                 [--upscale NAME[:SCALE]] WIDTHxHEIGHT|auto \"prompt\"" >&2
     echo "       render.sh [options] --layout DRAFT.json|-|'{...}'" >&2
     exit 2
 }
@@ -48,6 +52,8 @@ depth_end=
 model=
 layout=
 upscale=
+references=
+min_area=
 while [ $# -gt 0 ]; do
     case $1 in
     --lora)
@@ -124,6 +130,18 @@ while [ $# -gt 0 ]; do
         upscale=$2
         shift 2
         ;;
+    --reference)
+        [ $# -ge 2 ] || usage
+        [ -r "$2" ] || { echo "render.sh: cannot read $2" >&2; exit 2; }
+        references="$references$2
+"
+        shift 2
+        ;;
+    --min-area)
+        [ $# -ge 2 ] || usage
+        min_area=$2
+        shift 2
+        ;;
     --no-loras)
         loras="
 "
@@ -157,7 +175,8 @@ req=$(mktemp)
 trap 'rm -f "$tmp" "$req"' EXIT
 REQ=$req SIZE=$size PROMPT=$prompt LORAS=$loras STEPS=$steps MODEL=$model NEGATIVE=$negative GUIDANCE=$guidance \
     SAMPLER=$sampler SKIP=$skip SKIP_SET=$skip_set SEED=$seed IMAGE=$image STRENGTH=$strength \
-    COLOR_MAP=$color_map DEPTH_MAP=$depth_map COLOR_END=$color_end DEPTH_END=$depth_end UPSCALE=$upscale python3 -c '
+    COLOR_MAP=$color_map DEPTH_MAP=$depth_map COLOR_END=$color_end DEPTH_END=$depth_end UPSCALE=$upscale \
+    REFERENCES=$references MIN_AREA=$min_area python3 -c '
 import json, os, sys
 b = {"prompt": os.environ["PROMPT"], "size": os.environ["SIZE"], "n": 1, "response_format": "b64_json"}
 if os.environ["IMAGE"]:
@@ -184,6 +203,14 @@ if os.environ["STRENGTH"]:
         b["strength"] = float(os.environ["STRENGTH"])
     except ValueError:
         sys.exit("--strength takes a number")
+if os.environ["REFERENCES"]:
+    import base64
+    b["references"] = [base64.b64encode(open(p, "rb").read()).decode()
+                       for p in filter(None, os.environ["REFERENCES"].split("\n"))]
+if os.environ["MIN_AREA"]:
+    if not os.environ["MIN_AREA"].isdigit():
+        sys.exit("--min-area takes a whole number of pixels")
+    b["min_generation_area"] = int(os.environ["MIN_AREA"])
 if os.environ["MODEL"]:
     b["model"] = os.environ["MODEL"]
 if os.environ["UPSCALE"]:

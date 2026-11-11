@@ -252,6 +252,13 @@ uses unless told otherwise, at the scale shown.
 - `--color-map FILE`, `--depth-map FILE`, `--color-end F`, `--depth-end F`: control maps for a model with a control
   adapter (see "Layouts"; a draft's `color_map` / `depth_map` are passed by themselves).
 - `--layout DRAFT`: a MOSS-Image layout in place of size and prompt (see "Layouts").
+- `--reference FILE` (repeatable; MiniMax-H3-Image): a reference image for an edit or a composition. The prompt names
+  them `<Picture 1>`, `<Picture 2>`, ... in the order given; say what to keep from each, what to change, then
+  describe the whole target image. A render takes several and the model keeps what the prompt says to keep.
+- `--min-area N` (MiniMax-H3-Image): the model generates on a canvas of at least N pixels (default 2048x2048, where
+  it was trained, then resizes to the size asked for; its best work is 4 to 16 megapixels, e.g. 4096x4096,
+  4736x3552, 5472x3072 asked for directly). `--min-area 0` renders at the size itself: a 512x512 draft in seconds,
+  rougher. Larger canvases take longer (about 4 s a step at 2048x2048, 6 steps).
 - `--upscale NAME[:SCALE]`: after the render, the server's ESRGAN upscaler NAME (`scripts/upscalers.sh` lists them,
   with what each multiplies a side by and what it is for) enlarges the image to SCALE times the size (default: the
   upscaler's own, 4 for most; less is resampled down from its output). Use it when the user asks for a larger or

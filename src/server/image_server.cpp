@@ -28,6 +28,9 @@ namespace mako::server {
 namespace {
 
 constexpr auto kProgressEvery = std::chrono::seconds(5);
+// The most reference images a request gives, and the largest one.
+constexpr size_t kMaxReferences = 16;
+constexpr double kMaxReferencePixels = 4096.0 * 4096;
 // The largest image upscaling makes (its pixels), and the largest it takes.
 constexpr double kMaxUpscaled = 4096.0 * 4096, kMaxUpscaleInput = 2048.0 * 2048;
 
@@ -327,9 +330,8 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
         unsigned w = 0, h = 0;
         char x = 0;
         if (std::sscanf(sz.c_str(), "%u%c%u", &w, &x, &h) != 3 || x != 'x' || w % 32 || h % 32 || w < 256 ||
-            h < 256 || uint64_t(w) * h > 2048ull * 2048)
-            return fail(400, "size must be WIDTHxHEIGHT, multiples of 32 from 256, at most 2048x2048 pixels",
-                        "invalid_request_error");
+            h < 256)
+            return fail(400, "size must be WIDTHxHEIGHT, multiples of 32 from 256", "invalid_request_error");
         width = w;
         height = h;
         sized = true;
@@ -354,6 +356,11 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
     } catch (const std::exception& e) {
         return fail(400, e.what(), "invalid_request_error");
     }
+    if (uint64_t(width) * height > image::Engine::max_pixels(model.family))
+        return fail(400, std::format("size: {} makes at most {} megapixels", model.name,
+                                     double(image::Engine::max_pixels(model.family)) / 1e6),
+                    "invalid_request_error");
+    const uint32_t fixed = image::Engine::fixed_steps(model.family);
     std::optional<float> guidance = model.guidance;
     if (body.contains("negative_prompt") && !body["negative_prompt"].is_null()) {
         if (!body["negative_prompt"].is_string())
@@ -400,6 +407,52 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
         if (!v.is_number() || v.get_number() < 0 || v.get_number() > 100 || v.get_number() != std::floor(v.get_number()))
             return fail(400, "steps must be a whole number from 0 (the model's) to 100", "invalid_request_error");
         steps = uint32_t(v.get_number());
+    }
+    if (fixed && ((steps && steps != fixed) || negative || (guidance && *guidance != 1.0f) ||
+                  (sampler && *sampler != image::Sampler::euler)))
+        return fail(400, std::format("{} samples in {} Euler steps on its own schedule, without guidance: no steps "
+                                     "(or {}), negative_prompt, guidance_scale or sampler", model.name, fixed, fixed),
+                    "invalid_request_error");
+    // The smallest canvas a model that generates larger than asked uses.
+    std::optional<uint32_t> min_area = model.min_area;
+    if (body.contains("min_generation_area") && !body["min_generation_area"].is_null()) {
+        const auto& v = body["min_generation_area"];
+        if (!image::Engine::generates_on_canvas(model.family))
+            return fail(400, std::format("min_generation_area: {} generates at the size asked for", model.name),
+                        "invalid_request_error");
+        if (!v.is_number() || v.get_number() < 0 || v.get_number() > 4096.0 * 4096 || v.get_number() != std::floor(v.get_number()))
+            return fail(400, "min_generation_area must be a whole number of pixels up to 4096x4096 (0: the size asked for)",
+                        "invalid_request_error");
+        min_area = uint32_t(v.get_number());
+    }
+    // Reference images (models that edit with them): image files in base64, <Picture 1>, <Picture 2>, ... in order.
+    std::vector<std::vector<float>> ref_rgba;
+    std::vector<image::Engine::Request::Reference> references;
+    if (body.contains("references") && !body["references"].is_null()) {
+        const auto& v = body["references"];
+        if (!v.is_array())
+            return fail(400, "references must be an array of image files in base64", "invalid_request_error");
+        if (!image::Engine::takes_references(model.family))
+            return fail(400, std::format("references: {} takes no reference images", model.name), "invalid_request_error");
+        if (v.get_array().size() > kMaxReferences)
+            return fail(400, std::format("references: at most {}", kMaxReferences), "invalid_request_error");
+        for (const auto& e : v.get_array()) {
+            const auto bytes = e.is_string() ? unbase64(e.get_string()) : std::nullopt;
+            if (!bytes || bytes->empty())
+                return fail(400, std::format("references[{}] must be an image file in base64", references.size()),
+                            "invalid_request_error");
+            try {
+                const auto [w, h] = image::image_size(*bytes);
+                if (double(w) * h > kMaxReferencePixels || w < 32 || h < 32)
+                    return fail(400, std::format("references[{}]: {}x{} is outside 32 pixels a side to 16 megapixels",
+                                                 references.size(), w, h),
+                                "invalid_request_error");
+                ref_rgba.push_back(image::decode_image(*bytes, w, h));
+                references.push_back({w, h, ref_rgba.back()});
+            } catch (const std::exception& ex) {
+                return fail(400, std::format("references[{}]: {}", references.size(), ex.what()), "invalid_request_error");
+            }
+        }
     }
     image::Loras loras = model.loras;
     if (body.contains("loras") && !body["loras"].is_null()) {
@@ -517,10 +570,11 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
         lora_names += std::format("{}{} {:g}{}", lora_names.empty() ? ", LoRAs " : ", ",
                                   std::filesystem::path(l.path).stem().string(), l.scale,
                                   !l.merge ? "" : *l.merge ? " merged" : " unmerged");
-    log::info("{}: {} image{} {}x{} with {}{}{}{}{}, waiting for the image model", id, n, n > 1 ? "s" : "", width,
+    log::info("{}: {} image{} {}x{} with {}{}{}{}{}{}, waiting for the image model", id, n, n > 1 ? "s" : "", width,
               height, model.name, negative ? ", a negative prompt" : "", lora_names,
               asked_sampler ? std::format(", sampler {}", image::sampler_name(*sampler)) : "",
-              start.empty() ? "" : std::format(", from an image (strength {:g})", strength));
+              start.empty() ? "" : std::format(", from an image (strength {:g})", strength),
+              references.empty() ? "" : std::format(", {} reference image{}", references.size(), references.size() > 1 ? "s" : ""));
     std::string data = "[";
     uint32_t out_w = width, out_h = height; // the images' size (upscaled, if asked)
     try {
@@ -544,6 +598,8 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
             r.image = start;
             r.strength = strength;
             r.control = {color_map, depth_map, color_end, depth_end};
+            r.references = references;
+            r.min_area = min_area;
             auto last = std::chrono::steady_clock::now();
             const auto t0 = last;
             r.progress = [&](uint32_t step, uint32_t steps) {
@@ -648,6 +704,12 @@ void ImageServer::Impl::image_model_list(httplib::Response& res)
             data += R"(,"image_to_image":true)";
         if (!m.options.control.empty())
             data += R"(,"control":true)";
+        if (image::Engine::takes_references(m.family))
+            data += R"(,"references":true)";
+        if (const uint32_t fixed = image::Engine::fixed_steps(m.family))
+            data += std::format(R"(,"fixed_steps":{})", fixed);
+        if (m.min_area)
+            data += std::format(R"(,"min_generation_area":{})", *m.min_area);
         std::string l;
         for (const auto& x : m.loras)
             l += std::format(R"({}{{"name":{},"scale":{:g}{}}})", l.empty() ? "" : ",",

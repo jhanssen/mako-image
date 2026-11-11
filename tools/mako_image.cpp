@@ -3,7 +3,7 @@
 //              [--lora FILE[:SCALE] ...] [--terminal F] [--text-encoder DIR] [--transformer PATH] [--adapter DIR]
 //              [--negative TEXT] [--guidance F] [--sampler NAME] [--skip-blocks LIST] [--image FILE] [--strength F]
 //              [--control FILE] [--color-map FILE] [--depth-map FILE] [--color-end F] [--depth-end F]
-//              [--upscale FILE[:SCALE]] [--llm URL] [--llm-api-key KEY]
+//              [--reference FILE ...] [--min-area N] [--vae PATH] [--upscale FILE[:SCALE]] [--llm URL] [--llm-api-key KEY]
 // --lora adds a LoRA (repeatable; SCALE its strength, default 1; :merge into the weights or :unmerged beside them,
 // default the model's way: unmerged for MOSS-Image). --terminal: the schedule's last
 // noise level (0: not stretched there, as distilled few-step LoRAs are trained; default: the model's).
@@ -18,6 +18,9 @@
 // its own size, at most 1024x1024 pixels' area); --strength: the share of the steps run on it (default 0.75).
 // --control: a MOSS-Image control adapter; --color-map (a flat colour per subject) and --depth-map (near white) steer
 // the layout, each for the first --color-end / --depth-end share of the steps (default 1).
+// --reference: a reference image (repeatable; MiniMax-H3-Image), <Picture 1>, <Picture 2>, ... in the prompt's order.
+// --min-area: the smallest canvas, in pixels, a model that generates larger than asked uses (MiniMax-H3-Image:
+// 4194304, 2048x2048; 0: the size asked for). --vae: another file of the VAE's weights.
 // --upscale: an ESRGAN upscaler (tools/esrgan_to_safetensors.py) run on each image afterwards, to SCALE times the
 // size (default: the upscaler's own, 4 for most; less is resampled down from its output).
 // --llm: a mako_serve on this machine whose memory to borrow while the model is loaded (it unloads its LLM meanwhile).
@@ -76,7 +79,9 @@ int main(int argc, char** argv)
     std::optional<std::string> negative;
     std::optional<mako::image::Sampler> sampler;
     std::optional<std::vector<uint32_t>> skip_blocks;
-    std::string text_encoder, transformer, adapter, upscaler;
+    std::string text_encoder, transformer, adapter, upscaler, vae;
+    std::vector<std::string> references;
+    std::optional<uint32_t> min_area;
     float upscale = 0;
     bool rgb = false;
     mako::app::Cli cli("mako_image", "<model dir> <prompt>", 2, 2);
@@ -92,6 +97,11 @@ int main(int argc, char** argv)
         .option("--text-encoder", "DIR", "another directory of the text encoder's weights", text_encoder)
         .option("--transformer", "PATH", "another file or directory of the transformer's weights", transformer)
         .option("--adapter", "DIR", "a MOSS-Image data-space distillation adapter's directory", adapter)
+        .option("--vae", "PATH", "another file of the VAE's weights", vae)
+        .option("--reference", "FILE", "a reference image (repeatable; MiniMax-H3-Image)",
+                [&](const std::string& v) { references.push_back(v); })
+        .option("--min-area", "N", "the smallest canvas in pixels (MiniMax-H3-Image; default the model's, 0 none)",
+                [&](const std::string& v) { min_area = mako::app::Cli::parse<uint32_t>(v); })
         .option("--negative", "TEXT", "what the image should not be (guidance: two passes a step)",
                 [&](const std::string& v) { negative = v; })
         .option("--guidance", "F",
@@ -148,7 +158,13 @@ int main(int argc, char** argv)
             mako::log::info("the LLM's memory is free ({:.1f} s)", ms_since(t_load) / 1e3);
         }
         mako::mtl::Context ctx;
-        auto model = mako::image::Engine::open(pos[0], ctx, {text_encoder, transformer, adapter, control});
+        mako::image::Options options;
+        options.text_encoder = text_encoder;
+        options.transformer = transformer;
+        options.vae = vae;
+        options.adapter = adapter;
+        options.control = control;
+        auto model = mako::image::Engine::open(pos[0], ctx, options);
         auto& engine = *model;
         for (const auto& l : loras)
             engine.add_lora(l);
@@ -187,6 +203,18 @@ int main(int argc, char** argv)
             return mako::image::decode_image(b, width, height);
         };
         const auto cmap = read_map(color_map), dmap = read_map(depth_map);
+        // The references at their own size.
+        std::vector<std::vector<float>> ref_rgba;
+        std::vector<mako::image::Engine::Request::Reference> refs;
+        for (const std::string& path : references) {
+            std::ifstream f(path, std::ios::binary);
+            const std::vector<uint8_t> b{std::istreambuf_iterator<char>(f), {}};
+            if (b.empty())
+                throw std::runtime_error("cannot read " + path);
+            const auto [w, h] = mako::image::image_size(b);
+            ref_rgba.push_back(mako::image::decode_image(b, w, h));
+            refs.push_back({w, h, ref_rgba.back()});
+        }
         for (uint32_t n = 0; n < count; ++n) {
             mako::image::Engine::Request r;
             r.prompt = pos[1];
@@ -202,6 +230,8 @@ int main(int argc, char** argv)
             r.image = start;
             r.strength = strength;
             r.control = {cmap, dmap, color_end, depth_end};
+            r.references = refs;
+            r.min_area = min_area;
             auto t_step = Clock::now();
             r.progress = [&](uint32_t i, uint32_t total) {
                 mako::log::info("step {} of {}: {:.0f} ms, thermal {}", i, total, ms_since(t_step),

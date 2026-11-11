@@ -65,6 +65,8 @@ int main()
     check(r && r->status == 400 && r->body.contains("longer than"), "a prompt too long");
     r = post(R"({"prompt": "a cat"})");
     check(r && r->status == 400 && r->body.contains("error"), "the default model's directory missing: an error");
+    r = post(R"({"prompt": "a cat", "references": "aGVsbG8="})");
+    check(r && r->status == 400 && r->body.contains("error"), "references that are not an array");
     r = c.Get("/v1/images/upscalers");
     check(r && r->status == 200 && r->body.contains(R"("data":[])"), "/v1/images/upscalers: none to list");
     r = post(R"({"prompt": "a cat", "upscale": "4x-UltraSharp"})");

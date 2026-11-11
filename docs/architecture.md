@@ -107,6 +107,51 @@ came out a few percent off.
   1 / sqrt(sigma^2 + 1), the start noise by sqrt(1 + sigma_max^2). Euler, or Euler ancestral (the default): down to
   sqrt(next^2 - up^2), then fresh noise times up = next sqrt(1 - next^2 / sigma^2).
 
+### MiniMax-H3-Image
+
+- Transformer (33B): MiniMax-H3's (`models::H3` in mako-common, shared with mako-video), 50 blocks of full
+  self-attention over one packed sequence [text | reference images | image] (hidden 5376, 56 heads of 128, SwiGLU
+  14336), each row modulated by the AdaLN parameters of its (timestep, modality); a two-block token refiner on the
+  projected text; three-axis rotary positions: text rows at (i, 0, 0), each reference image one unit on the time
+  axis after the text's length, the generated image the unit after the last reference, the spatial axes the latent
+  grid centred on the unit square times 32. Without the video model's audio stream, and with one F32 output head
+  per step of its distilled schedule (the release's `pdd_fused_heads.safetensors`, or stacked in the ComfyUI
+  repack's `final_layer.video_out`: the first whole, the others as offsets from it). The repack is pruned: its time
+  embedder and the blocks' 2688-wide modulation projections are folded into an 8-coordinate curve table over t in
+  [0, 1] and [96768][8] F16 projections (mako-video checked the mapping against the full video model at 2e-4). A
+  token is a 2x2 patch of the 24-channel latent (96 values); the engine's latents are one latent a token, packed and
+  unpacked around each step.
+- Text: Qwen3-VL-32B's 50th layer output (before any norm; the first 50 of its 64 layers load, 49 GB), the prompt's
+  tokens verbatim (no template, no special tokens around it, the first 4096). An edit's presentation puts a
+  `Picture i: ` label and a vision block (start, the merged tokens' pads, end) per reference before the prompt; the
+  block's rows carry the image modality tag for the transformer's modulation. The vision tower (`models::QwenVision`)
+  sees each reference at a 1024 short edge.
+- References: each at its own size for the VAE (resized, keeping its ratio, only when its short edge is outside
+  1024 to 2048 pixels; cropped at the top left to whole latents, the latents to whole patches), its posterior
+  sampled and the sample rounded to fp16 as the release does, then mixed with noise to t = 0.999 and held there for
+  every step ahead of the generated rows. The posterior's and the mixing noise come from the request's seed.
+- VAE (`image::H3ImageVae`, its own runtime; the release's `vae/` file or the repack's fp16 one, the model's own
+  tensor names, so the release's `vae_diffusers/` copy is not read): the video VAE's causal 3D CNN encoder over one
+  frame (its last time taps: group norms, SiLU, reflect-padded 3x3 convolutions in six levels of two residual blocks, a stride-2
+  downsample after the first four, 16x down to 48 moments, a 1x1 quant convolution) and a 2D ViT decoder: a 1x1
+  post-quant convolution, a token per latent pixel (24 -> 1024) plus four learned register tokens and a zero token,
+  24 pre-norm blocks (RMS norms, 16 heads of 64 with unscaled RMS norms on q and k and two-axis rotary positions
+  over half of each head at base 100, the coordinates centred on [-1, 1), residuals scaled per channel, a gated
+  SiLU FFN of 4096), a layer norm and a projection to each token's 16x16 pixel patch. Pixels are ImageNet-normalized
+  RGB over [0, 1]. Both run in 256-pixel tiles with overlaps of at least 64 blended linearly (the slack spread over
+  the overlaps in whole latents), as the model shipped, so a larger tile changes the image. Latents are normalized
+  per channel by the release's mean and deviation. Weights F16 (the repack's, or the release's F32 rounded).
+- Schedule: the release's grid 1, 0.9675, 0.8875, 0.75, 0.5328, 0.2320, 0, each sigma rounded through its float
+  timestep 1 - sigma as the pipeline does; Euler in the velocity form (the transformer's velocity points at the
+  data, the engine's loop steps along the noise, so the step negates it); no guidance, no other step count.
+- Memory: the text encoder (49 GB) and the transformer (40 GB pruned, 66 GB as released) each in their own runtime;
+  the transformer loads on first use. Where the two do not fit together with room (1.35 x their files against the
+  machine's memory) they take turns: the text encoder (and the vision tower) is freed when the transformer loads
+  and loaded again for the next prompt, the transformer freed then.
+- Canvas: an image smaller than `min_area` pixels (2048x2048 by default, as released) is generated at the same
+  aspect ratio on a canvas of that area (sides rounded to multiples of 32, Python's rounding) and resized to the size
+  asked for with Lanczos after the pipeline's 8-bit truncation; the PNG records the canvas.
+
 ### ESRGAN upscalers
 
 `image::Esrgan` runs RRDBNet (the original ESRGAN's and Real-ESRGAN's, from a safetensors in Real-ESRGAN's names that

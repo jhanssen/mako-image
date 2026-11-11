@@ -105,6 +105,10 @@ std::vector<uint8_t> with_provenance(std::vector<uint8_t> png, const Provenance&
         params += std::format(", Control color end: {:g}", *p.color_end);
     if (p.depth_end)
         params += std::format(", Control depth end: {:g}", *p.depth_end);
+    if (p.canvas)
+        params += std::format(", Canvas: {}x{}", p.canvas->first, p.canvas->second);
+    if (p.references)
+        params += std::format(", References: {}", p.references);
     if (p.upscale)
         params += std::format(", Hires upscale: {:g}, Hires upscaler: {}", p.upscale->scale, p.upscale->model);
     std::string loras;
@@ -122,13 +126,15 @@ std::vector<uint8_t> with_provenance(std::vector<uint8_t> png, const Provenance&
         skip += std::format("{}{}", skip.empty() ? "" : ",", b);
     const std::string json = std::format(
         "{{\"prompt\":{},\"negative_prompt\":{},\"model\":{},\"steps\":{},\"guidance\":{:g},\"sampler\":{},"
-        "\"seed\":{},\"width\":{},\"height\":{},\"loras\":[{}]{}{}{}{}{}}}",
+        "\"seed\":{},\"width\":{},\"height\":{},\"loras\":[{}]{}{}{}{}{}{}{}}}",
         json_string(p.prompt), p.negative ? json_string(*p.negative) : "null", json_string(p.model), p.steps,
         p.guidance, json_string(p.sampler), p.seed, p.width, p.height, loras,
         skip.empty() ? "" : std::format(",\"skip_blocks\":[{}]", skip),
         p.strength ? std::format(",\"strength\":{:g}", *p.strength) : "",
         p.color_end ? std::format(",\"control_color_end\":{:g}", *p.color_end) : "",
         p.depth_end ? std::format(",\"control_depth_end\":{:g}", *p.depth_end) : "",
+        p.canvas ? std::format(",\"canvas\":\"{}x{}\"", p.canvas->first, p.canvas->second) : "",
+        p.references ? std::format(",\"references\":{}", p.references) : "",
         p.upscale ? std::format(",\"upscale\":{{\"model\":{},\"scale\":{:g}}}", json_string(p.upscale->model),
                                 p.upscale->scale)
                   : "");

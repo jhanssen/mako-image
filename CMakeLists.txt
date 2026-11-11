@@ -29,7 +29,7 @@ set(S ${CMAKE_CURRENT_SOURCE_DIR}/src)
 mako_add_kernels(image_kernels SOURCES ${S}/kernels/image.metal)
 
 add_library(mako_imagegen STATIC ${S}/image/engine.cpp ${S}/image/esrgan.cpp ${S}/image/qwen_image.cpp ${S}/image/krea2.cpp
-            ${S}/image/moss_image.cpp ${S}/image/anima.cpp ${S}/image/sdxl.cpp ${S}/image/clip_tokenizer.cpp ${S}/image/er_sde.cpp
+            ${S}/image/moss_image.cpp ${S}/image/anima.cpp ${S}/image/sdxl.cpp ${S}/image/h3_image.cpp ${S}/image/h3_vae.cpp ${S}/image/clip_tokenizer.cpp ${S}/image/er_sde.cpp
             ${S}/image/png.cpp)
 target_include_directories(mako_imagegen PUBLIC ${S})
 target_link_libraries(mako_imagegen PUBLIC mako_gpu mako_models mako_safetensors mako_text mako_log
@@ -60,6 +60,9 @@ set(MAKO_ANIMA_REF "$ENV{MAKO_ANIMA_REF}" CACHE PATH "Anima reference tensors fo
 set(MAKO_SDXL "$ENV{MAKO_SDXL}" CACHE PATH "SDXL directory (its checkpoint and tokenizer/) for its tests")
 set(MAKO_SDXL_REF "$ENV{MAKO_SDXL_REF}" CACHE PATH "SDXL reference tensors for its tests")
 set(MAKO_SDXL_LORA "$ENV{MAKO_SDXL_LORA}" CACHE FILEPATH "SDXL LoRA (Kohya's format) its reference's lora_manifest.json names")
+set(MAKO_H3_IMAGE "$ENV{MAKO_H3_IMAGE}" CACHE PATH "MiniMax-H3-Image directory (the release's files, text_encoder/ linked) for its tests")
+set(MAKO_H3_IMAGE_REF "$ENV{MAKO_H3_IMAGE_REF}" CACHE PATH "MiniMax-H3-Image reference tensors (tools/dump_h3_image_ref.py) for its tests")
+set(MAKO_H3_IMAGE_PRUNED "$ENV{MAKO_H3_IMAGE_PRUNED}" CACHE FILEPATH "MiniMax-H3-Image's pruned transformer (the ComfyUI repack) for its tests")
 set(MAKO_T5_TOKENIZER "$ENV{MAKO_T5_TOKENIZER}" CACHE FILEPATH "T5 tokenizer.json for the unigram tokenizer test")
 set(MAKO_UPSCALERS "$ENV{MAKO_UPSCALERS}" CACHE PATH "ESRGAN upscalers (.safetensors) for their test")
 set(MAKO_ESRGAN_REF "$ENV{MAKO_ESRGAN_REF}" CACHE PATH "ESRGAN reference outputs (a directory a model) for the upscalers' test")

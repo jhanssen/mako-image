@@ -41,6 +41,8 @@ struct Provenance {
     uint64_t seed = 0;
     std::optional<float> strength; // image to image: the share of the steps run on the starting image
     std::optional<float> color_end, depth_end; // control maps given: the share of the steps each steered
+    std::optional<std::pair<uint32_t, uint32_t>> canvas; // generated at this size, then resized
+    uint32_t references = 0;                             // reference images in the sequence
     // Upscaled afterwards: the model's name and the size's multiple.
     struct Upscale {
         std::string model;

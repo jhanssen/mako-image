@@ -86,6 +86,8 @@ ImageModel load_image_model(const std::string& dir, const std::string& name)
             m.options.transformer = resolve(base, *v);
         if (auto v = str("text_encoder"))
             m.options.text_encoder = resolve(base, *v);
+        if (auto v = str("vae"))
+            m.options.vae = resolve(base, *v);
         if (auto v = str("adapter"))
             m.options.adapter = resolve(base, *v);
         if (auto v = str("control"))
@@ -103,6 +105,11 @@ ImageModel load_image_model(const std::string& dir, const std::string& name)
         }
         if (auto v = num("terminal"))
             m.terminal = float(*v);
+        if (auto v = num("min_area")) {
+            if (*v < 0 || *v > 4096.0 * 4096 || *v != double(uint32_t(*v)))
+                throw std::runtime_error(cfg.string() + ": min_area must be a whole number of pixels up to 4096x4096");
+            m.min_area = uint32_t(*v);
+        }
         if (auto v = num("guidance"))
             m.guidance = float(*v);
         if (auto v = str("sampler")) {
@@ -142,7 +149,7 @@ ImageModel load_image_model(const std::string& dir, const std::string& name)
             }
         }
     }
-    for (const std::string* p : {&m.options.transformer, &m.options.text_encoder, &m.options.adapter,
+    for (const std::string* p : {&m.options.transformer, &m.options.text_encoder, &m.options.vae, &m.options.adapter,
                                  &m.options.control})
         if (!p->empty() && !fs::exists(*p))
             throw std::runtime_error(std::format("{}: {} does not exist", name, *p));
@@ -168,6 +175,13 @@ ImageModel load_image_model(const std::string& dir, const std::string& name)
             throw std::runtime_error(std::format("{}: {} keeps no LoRA unmerged", name, m.family));
     if (m.skip_blocks && !m.skip_blocks->empty() && !image::Engine::skips_blocks(m.family))
         throw std::runtime_error(std::format("{}: {} has no blocks to skip", name, m.family));
+    if (m.min_area && !image::Engine::generates_on_canvas(m.family))
+        throw std::runtime_error(std::format("{}: {} generates at the size asked for (no min_area)", name, m.family));
+    if (const uint32_t fixed = image::Engine::fixed_steps(m.family);
+        fixed && ((m.steps && m.steps != fixed) || m.terminal || (m.guidance && *m.guidance != 1.0f) ||
+                  (m.sampler && *m.sampler != image::Sampler::euler)))
+        throw std::runtime_error(std::format("{}: {} samples in {} Euler steps on its own schedule, without guidance",
+                                             name, m.family, fixed));
     return m;
 }
 

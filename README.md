@@ -1,7 +1,7 @@
 # mako-image
 
-Image generation on Apple Silicon from the models' original files: Qwen-Image 2.1, Krea 2, MOSS-Image, Anima and
-SDXL (single-file checkpoints such as Illustrious fine-tunes).
+Image generation on Apple Silicon from the models' original files: Qwen-Image 2.1, Krea 2, MOSS-Image, MiniMax-H3-Image,
+Anima and SDXL (single-file checkpoints such as Illustrious fine-tunes).
 An OpenAI-compatible HTTP server (`mako_image_serve`) and a command-line tool (`mako_image`).
 
 It runs beside [mako](https://github.com/jhanssen/mako) (LLM inference) or on its own. On a Mac that runs both and
@@ -57,9 +57,9 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   | jq -r '.data[0].b64_json' | base64 -d > out.png
 ```
 
-- A model directory holds the model's files as published (Qwen-Image 2.1, Krea 2, MOSS-Image: `model_index.json`
-  says which; Anima and SDXL: below), or a `mako.json` pointing at them, with its settings (every field optional, paths
-  relative to the directory or from `~/`):
+- A model directory holds the model's files as published (Qwen-Image 2.1, Krea 2, MOSS-Image, MiniMax-H3-Image:
+  `model_index.json` says which; Anima and SDXL: below), or a `mako.json` pointing at them, with its settings (every
+  field optional, paths relative to the directory or from `~/`):
 
   ```json
   {"model": "~/models/qwen-image-2.1", "text_encoder": "~/models/qwen-image-2.1-te-heretic",
@@ -68,29 +68,29 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
    "prompting": "how to write its prompts"}
   ```
 
-  `text_encoder` and `transformer` take another copy of those weights (a refusal-ablated text encoder, a checkpoint
-  with LoRAs merged); `loras` are added for requests that name none (by name in `lora_dir`, default the directory's
+  `text_encoder`, `transformer` and `vae` take another copy of those weights (a refusal-ablated text encoder, a
+  checkpoint with LoRAs merged, a repack's VAE); `loras` are added for requests that name none (by name in `lora_dir`, default the directory's
   `loras/`; a scale, or `{"scale": 1.0, "merge": false}` to choose how it goes in, below); `steps` (0: the model's),
   `terminal` (the schedule's last noise level, 0: none, as few-step LoRAs want), `guidance`, `sampler` and
   `skip_blocks` set its defaults; `adapter` (MOSS-Image) a data-space distillation adapter, `control` (MOSS-Image) a control adapter file (both
-  below). The directory is
+  below); `min_area` (MiniMax-H3-Image) the smallest canvas in pixels (below). The directory is
   read on each request: models and LoRAs added later count.
 - `GET /v1/images/models` lists the models: `id`, `family` (which model it is), `description`, `prompting`,
-  `default`, `loaded`, `steps`, `guidance`, `sampler` and `skip_blocks` where set, `image_to_image` and `control`
-  when it takes a starting image or control maps, and the default `loras` with their
-  scales (and `merge` where set).
+  `default`, `loaded`, `steps`, `guidance`, `sampler` and `skip_blocks` where set, `image_to_image`, `control` and
+  `references` when it takes a starting image, control maps or reference images, `fixed_steps` and
+  `min_generation_area` where the model has them, and the default `loras` with their scales (and `merge` where set).
 - MOSS-Image also takes a layout as its prompt: compact JSON with a caption for the whole image and a box per
   character, object or text (`{"summary": {"caption": ...}, "items": [{"label": "character", "caption": ...,
   "bbox": [y0, x0, y1, x1]}, ...], "bbox_coord_space": "abs_centralized", "bbox_format": "yxyx"}`, boxes in pixels
   from the image's centre). The skill's `render.sh --layout` builds it from boxes in pixels from the top-left.
 - Fields: `prompt` (required, at most 16384 bytes, as is `negative_prompt`; Qwen-Image reads the first 1024 tokens),
   `model` (a name from that list), `n` (1-4), `size` (`WIDTHxHEIGHT` in multiples of 32
-  from 256, at most 2048x2048 pixels; `auto`: 1024x1024), `response_format` (`b64_json` only: images are not stored),
+  from 256, at most 2048x2048 pixels, MiniMax-H3-Image 6272x2688; `auto`: 1024x1024), `response_format` (`b64_json` only: images are not stored),
   `output_format` (`png` or `jpeg`; a PNG carries how it was made in text chunks: `parameters`, the prompt, negative
   prompt, steps, CFG scale, seed, size, model and LoRAs as image tools commonly read them, and `mako`, the same as
   JSON). `quality`, `style`, `background`, `moderation` and `user` are accepted and left
-  alone: the model's steps (Qwen-Image 2.1 40, Krea 2 Turbo 8, MOSS-Image 50, Anima Turbo 10, Anima 30, SDXL 28), a
-  random seed for each image (in the log) unless `seed` gives one.
+  alone: the model's steps (Qwen-Image 2.1 40, Krea 2 Turbo 8, MOSS-Image 50, MiniMax-H3-Image 6, Anima Turbo 10,
+  Anima 30, SDXL 28), a random seed for each image (in the log) unless `seed` gives one.
 - Extensions: `steps` (0 to 100; 0: the model's own), `negative_prompt` (what the image should not be) and
   `guidance_scale` (its strength; default the model directory's, else the model's: Qwen-Image 2.1 4, Krea 2 Turbo 2,
   MOSS-Image 3, Anima 4, SDXL 6), `sampler` (`euler`; `euler_a`, Euler ancestral, for SDXL only; `er_sde`, the
@@ -108,10 +108,21 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   prompt when the request gives none, that pass skipping block 22 (`skip_blocks`). Anima (not Turbo) is guided by
   default against its model card's negative prompt without the score tags the card advises against for it ("worst
   quality, low quality, artist name, blurry, jpeg artifacts, chromatic aberration"), SDXL against "bad quality, worst
-  quality, worst detail, sketch, censor" (WAI-illustrious's recommended one).
+  quality, worst detail, sketch, censor" (WAI-illustrious's recommended one). MiniMax-H3-Image is distilled to its
+  six steps with one output head each and no guidance: `steps` other than 6 (or 0), `negative_prompt`, `guidance_scale`
+  other than 1, `sampler` other than `euler` and `terminal` are refused. Its extensions: `references`, an array of
+  image files in base64 (or `data:` URLs; up to 16, 32 pixels a side to 16 megapixels each) the prompt names in that
+  order as `<Picture 1>`, `<Picture 2>`, ... (an edit: say what to keep, what to change, then describe the whole
+  target image), each taken at its own size (resized only when its short edge is outside 1024 to 2048 pixels), and
+  `min_generation_area`: the model generates on a canvas of at least this many pixels (default 4194304, 2048x2048,
+  as released, where it was trained; 4 to 16 megapixels is its working range) at the aspect ratio asked for and
+  resizes the image to `size` (Lanczos); `0` generates at `size` itself (a 512x512 draft in 13 s instead of 37).
+  The PNG records the canvas (`Canvas`) and the number of references.
 - One model is in memory at a time, loaded by the first request for it; a request for another model or other LoRAs
   than the loaded ones loads those first. `GET /v1/status` says which is loaded.
 - Time: Qwen-Image 2.1 ~13 s for 512x512, ~63 s for 1024x1024 (40 steps); Krea 2 Turbo ~5 s and ~23 s (8 steps);
+  MiniMax-H3-Image ~37 s for 1024x1024 (6 steps on its 2048x2048 canvas, 4.3 s a step, the first 14), ~13 s for
+  512x512 generated at that size (`min_generation_area` 0);
   MOSS-Image ~32 s and ~145 s (50 steps, two passes each: 2.3 s a step cool, 3.4 s once warm); Anima Turbo 4.5 s for
   1024x1024 (10 steps), Anima Aesthetic 27 s (30 steps, two passes each), SDXL (WAI-illustrious v17) ~13 s for
   1024x1024 or 832x1216 (28 steps, two passes each); slower as the Mac heats up; the log has
@@ -194,8 +205,25 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   out.png] [--scale F] [--tile N] [--overlap N]` does the same from the command line, `mako_image --upscale
   FILE[:SCALE]` after a generation, the skill's `render.sh --upscale NAME[:SCALE]` through the server
   (`scripts/upscalers.sh` lists them).
-- Not yet: condition images (edits, references; `/v1/images/edits`), and image to image for the other models (their
-  VAEs' encoders).
+- MiniMax-H3-Image (MiniMaxAI/MiniMax-H3-Image, text to image and editing with reference images; 33 B parameters,
+  the H3 video model's transformer without its audio stream, its Qwen3-VL-32B text encoder unchanged): a directory
+  with the release's small files and either the release's `transformer/` shards (66 GB BF16, with
+  `pdd_fused_heads.safetensors`, the per-step output heads) or the ComfyUI repack's pruned single file
+  (Comfy-Org/MiniMax-H3-Image, `minimax_h3_image_pruned_bf16.safetensors`, 40 GB: the time embedder and the blocks'
+  2688-wide modulation projections folded into an 8-coordinate curve table, the heads stacked in its own output
+  head), named by `transformer`; the VAE as the release's `vae/` (fp32, 2.3 GB; its `vae_diffusers/` copy under
+  diffusers' tensor names is not read) or the repack's fp16 file (`vae`); the text encoder MiniMax-H3's (`hf download MiniMaxAI/MiniMax-H3 --include 'text_encoder/*'`, 67 GB,
+  linked or named by `text_encoder`; its first 50 layers load, 49 GB). The repack's int8 and NVFP4 files are not
+  read (ComfyUI's own formats). In memory: the text encoder and the pruned transformer together, 89 GB, so a 128 GB
+  Mac runs it beside nothing else large (`--llm` borrows mako's). With the release's shards (66 GB) the two do not
+  fit together with room there (the rule: 1.35 x their files against the machine's memory), so they take turns: the
+  text encoder is freed when the transformer loads and loaded again for the next prompt, the transformer freed
+  then, about 115 GB read from the SSD per request. The prompt goes in verbatim (no template; a long
+  English description of the whole image works best, as the model's prompt expander writes them; the first 4096
+  tokens). Its own schedule: six Euler steps on a fixed sigma grid, each step through its own output head, no
+  guidance; LoRAs merge into the transformer (none tried).
+- Not yet: `/v1/images/edits` (MiniMax-H3-Image's references go through `references` of a generation), condition
+  images for the other models, and image to image for the other models (their VAEs' encoders).
 
 
 ## Tests
@@ -214,11 +242,21 @@ The `cpu` tests include `er_sde`: the ER-SDE sampler over a made-up model agains
 | `MAKO_MOSS`, `MAKO_MOSS_REF` | `moss_*` |
 | `MAKO_ANIMA`, `MAKO_ANIMA_TRANSFORMER`, `MAKO_ANIMA_REF` | `anima_*` |
 | `MAKO_SDXL`, `MAKO_SDXL_REF`, `MAKO_SDXL_LORA` | `sdxl_*` |
+| `MAKO_H3_IMAGE`, `MAKO_H3_IMAGE_REF`, `MAKO_H3_IMAGE_PRUNED` (the repack's transformer) | `h3_image_*` |
 | `MAKO_UPSCALERS`, `MAKO_ESRGAN_REF` | `esrgan` |
 | `MAKO_T5_TOKENIZER` (a T5 `tokenizer.json`) | `unigram` |
 
 The image tests compare with reference tensors from the original pipeline (fp32 on the CPU), written by a Python
-script kept beside the model, not in this repository. `esrgan` compares the upscalers with PyTorch's output
+script kept beside the model, not in this repository; MiniMax-H3-Image's by `tools/dump_h3_image_ref.py` (the Diffusers
+implementation: the text encoder in fp32 on the CPU, the release's transformer with its BF16 weights in fp32 on MPS,
+the VAE in fp32), the `h3_image_pruned_*` tests running the repack's transformer against the same tensors: text
+embeddings within 3e-5, the transformer's velocities within 0.4-2% a step (the pruned file 0.5-1%), the decoded
+image within 6e-4 (a level or two off in 6% of the 8-bit samples), the encoder's latents within 3e-3; an edit's
+presentation (two reference pictures) within 5e-3 and its velocities within 4% (2-3% with the reference's own
+latents: the engine's F16 VAE encode of the references moves the output more than the transformer does). The edit
+tests pass the pipeline's resized reference pictures in and check the engine's Lanczos resize at the pixel level on
+its own (Qwen3-VL's vision tower moves 30% on the rounding differences between two Lanczos implementations over
+a smooth synthetic picture, so no resize but a bit-identical one keeps the tower's output comparable). `esrgan` compares the upscalers with PyTorch's output
 (spandrel's RRDBNet, fp32) for a 48x32 crop of a render: `MAKO_ESRGAN_REF/NAME/` holds `manifest.json` (`width`,
 `height`, `factor`), `input.f32` and `output.f32` (RGBA channels-last in [-1, 1]) for `MAKO_UPSCALERS/NAME.safetensors`,
 all at once and in 16-pixel tiles.
