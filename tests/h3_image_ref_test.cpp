@@ -289,7 +289,7 @@ int main(int argc, char** argv)
         const uint32_t C = uint32_t(m["reference_rows"].get_number());
         const auto rows = read_f32(ref / "final_rows.f32");
         const auto z = unpacked(std::span(rows).subspan(uint64_t(C) * 96), lat, lat);
-        const auto rgb = engine.vae().decode(z, lat, lat);
+        const auto rgb = engine.vae().decode(z, 1, lat, lat);
         compare("decoded image", rgb, read_f32(ref / "vae_out.f32"), 3, 0.02);
         const auto img = engine.decode(z, lat, lat);
         const auto want = read_u8(ref / "vae_out.u8");

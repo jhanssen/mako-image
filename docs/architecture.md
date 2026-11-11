@@ -130,9 +130,10 @@ came out a few percent off.
   1024 to 2048 pixels; cropped at the top left to whole latents, the latents to whole patches), its posterior
   sampled and the sample rounded to fp16 as the release does, then mixed with noise to t = 0.999 and held there for
   every step ahead of the generated rows. The posterior's and the mixing noise come from the request's seed.
-- VAE (`image::H3ImageVae`, its own runtime; the release's `vae/` file or the repack's fp16 one, the model's own
-  tensor names, so the release's `vae_diffusers/` copy is not read): the video VAE's causal 3D CNN encoder over one
-  frame (its last time taps: group norms, SiLU, reflect-padded 3x3 convolutions in six levels of two residual blocks, a stride-2
+- VAE (`models::H3Vae` in mako-common, shared with mako-video, whose VAE is the same model with a decoder of 36
+  blocks of 2048 and tokens four frames deep, told apart by the weights' shapes; the release's `vae/` file or the
+  repack's fp16 one, the model's own tensor names, so the release's `vae_diffusers/` copy is not read): the video
+  VAE's causal 3D CNN encoder over one frame (its last time taps: group norms, SiLU, reflect-padded 3x3 convolutions in six levels of two residual blocks, a stride-2
   downsample after the first four, 16x down to 48 moments, a 1x1 quant convolution) and a 2D ViT decoder: a 1x1
   post-quant convolution, a token per latent pixel (24 -> 1024) plus four learned register tokens and a zero token,
   24 pre-norm blocks (RMS norms, 16 heads of 64 with unscaled RMS norms on q and k and two-axis rotary positions

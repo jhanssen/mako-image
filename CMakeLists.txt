@@ -29,7 +29,7 @@ set(S ${CMAKE_CURRENT_SOURCE_DIR}/src)
 mako_add_kernels(image_kernels SOURCES ${S}/kernels/image.metal)
 
 add_library(mako_imagegen STATIC ${S}/image/engine.cpp ${S}/image/esrgan.cpp ${S}/image/qwen_image.cpp ${S}/image/krea2.cpp
-            ${S}/image/moss_image.cpp ${S}/image/anima.cpp ${S}/image/sdxl.cpp ${S}/image/h3_image.cpp ${S}/image/h3_vae.cpp ${S}/image/clip_tokenizer.cpp ${S}/image/er_sde.cpp
+            ${S}/image/moss_image.cpp ${S}/image/anima.cpp ${S}/image/sdxl.cpp ${S}/image/h3_image.cpp ${S}/image/clip_tokenizer.cpp ${S}/image/er_sde.cpp
             ${S}/image/png.cpp)
 target_include_directories(mako_imagegen PUBLIC ${S})
 target_link_libraries(mako_imagegen PUBLIC mako_gpu mako_models mako_safetensors mako_text mako_log

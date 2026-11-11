@@ -53,7 +53,7 @@ H3Image::H3Image(const std::string& dir, mtl::Context& ctx, const Options& opts)
     : Engine(ctx, opts), text_dir_(opts.text_encoder.empty() ? dir + "/text_encoder" : opts.text_encoder)
 {
     dir_ = dir;
-    lat_ = H3ImageVae::kLatent; // a token is one latent; the transformer takes them as 2x2 patches
+    lat_ = models::H3Vae::kLatent; // a token is one latent; the transformer takes them as 2x2 patches
     grid_.assign(std::begin(kGrid), std::end(kGrid));
     if (const std::string cfg = dir + "/pdd_config.json"; fs::exists(cfg)) {
         glz::generic j;
@@ -82,7 +82,11 @@ H3Image::H3Image(const std::string& dir, mtl::Context& ctx, const Options& opts)
         vw = dir + "/vae/diffusion_pytorch_model.safetensors";
     if (vw.empty())
         throw std::runtime_error(dir + ": no VAE weights (vae/diffusion_pytorch_model.safetensors, or \"vae\" in mako.json)");
-    vae_ = std::make_unique<H3ImageVae>(vw, vcfg, ctx, opts.telemetry);
+    if (fs::is_directory(vw))
+        vw += "/diffusion_pytorch_model.safetensors";
+    vae_ = std::make_unique<models::H3Vae>(vw, vcfg, ctx, opts.telemetry, "image VAE");
+    if (vae_->patch_t() != 1)
+        throw std::runtime_error(std::format("{}: a decoder with tokens {} frames deep (the video model's VAE)", vw, vae_->patch_t()));
     dit_path_ = opts.transformer.empty() ? dir + "/transformer" : opts.transformer;
     if (!fs::exists(dit_path_))
         throw std::runtime_error(dit_path_ + ": no transformer");
@@ -194,7 +198,7 @@ void H3Image::set_references(const Request& r)
                 std::copy_n(&rgb[uint64_t(y) * ew * 3], uint64_t(W) * 3, &cropped[uint64_t(y) * W * 3]);
             rgb = std::move(cropped);
         }
-        std::vector<float> noise(uint64_t(lh) * lw * H3ImageVae::kLatent), mix(noise.size());
+        std::vector<float> noise(uint64_t(lh) * lw * models::H3Vae::kLatent), mix(noise.size());
         for (auto [dst, k] : {std::pair{&noise, 2 * i}, std::pair{&mix, 2 * i + 1}}) {
             if (!r.reference_noise.empty()) {
                 if (r.reference_noise[k].size() != dst->size())
@@ -212,10 +216,10 @@ void H3Image::set_references(const Request& r)
         const float t = kRefT, u = float(1.0 - double(kRefT));
         for (uint32_t py = 0; py < ref.lh / 2; ++py)
             for (uint32_t px = 0; px < ref.lw / 2; ++px)
-                for (uint32_t c = 0; c < H3ImageVae::kLatent; ++c)
+                for (uint32_t c = 0; c < models::H3Vae::kLatent; ++c)
                     for (uint32_t dy = 0; dy < 2; ++dy)
                         for (uint32_t dx = 0; dx < 2; ++dx) {
-                            const uint64_t v = (uint64_t(2 * py + dy) * lw + 2 * px + dx) * H3ImageVae::kLatent + c;
+                            const uint64_t v = (uint64_t(2 * py + dy) * lw + 2 * px + dx) * models::H3Vae::kLatent + c;
                             cond_rows_.push_back(t * z[v] + u * mix[v]);
                         }
         refs_.push_back(std::move(ref));
@@ -351,7 +355,7 @@ std::vector<float> H3Image::decode(std::span<const float> latents, uint32_t h, u
 {
     if (latents.size() != uint64_t(h) * w * lat_)
         throw std::runtime_error(std::format("latents must be [h * w][{}]", lat_));
-    const auto rgb = vae_->decode(latents, h, w);
+    const auto rgb = vae_->decode(latents, 1, h, w);
     // 8-bit levels by truncation, as the released pipeline quantizes its images.
     const uint64_t px = uint64_t(h) * w * 256;
     std::vector<float> out(px * 4);

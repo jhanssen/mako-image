@@ -1,7 +1,7 @@
 #pragma once
 
 #include "image/engine.hpp"
-#include "image/h3_vae.hpp"
+#include "models/h3_vae.hpp"
 #include "models/h3.hpp"
 #include "models/qwen_vision.hpp"
 
@@ -58,7 +58,7 @@ public:
     const models::QwenVision::Features& reference_features(size_t i) const { return refs_.at(i).features; }
     // The references' conditioning rows ([rows][96], noised to kRefT), as set_references() encoded them.
     std::span<const float> reference_rows() const { return cond_rows_; }
-    H3ImageVae& vae() { return *vae_; }
+    models::H3Vae& vae() { return *vae_; }
     models::QwenVision& vision();
     // The references of the next generation: resized for the text encoder (their vision features) and the VAE
     // (their latents, sampled and noised to kRefT), in the request's order.
@@ -79,7 +79,7 @@ private:
     std::vector<uint8_t> text_tags_;
     std::vector<float> grid_; // the schedule's sigmas, the terminal 0 last
     std::unique_ptr<models::H3> dit_;
-    std::unique_ptr<H3ImageVae> vae_;
+    std::unique_ptr<models::H3Vae> vae_;
     std::unique_ptr<models::QwenVision> vision_;
     std::string text_dir_, dit_path_, heads_path_;
     std::vector<Lora> loras_; // merged when the transformer loads
