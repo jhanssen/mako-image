@@ -30,7 +30,8 @@ for m in d["data"]:
         print("    " + ", ".join([f"{k} {m[k]:g}" for k in ("steps", "guidance") if k in m] +
                                  ([f"sampler {m['sampler']}"] if "sampler" in m else [])))
     takes = [t for k, t in (("image_to_image", "a starting image (--image)"),
-                            ("control", "control maps (--color-map, --depth-map)")) if m.get(k)]
+                            ("control", "control maps (--color-map, --depth-map)"),
+                            ("references", "reference images (--reference)")) if m.get(k)]
     if takes:
         print("    takes " + " and ".join(takes))
     if m.get("loras"):

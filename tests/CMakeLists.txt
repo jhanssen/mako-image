@@ -37,6 +37,8 @@ foreach(m tokens text dit vae pipeline)
     add_test(NAME image_${m} COMMAND image_ref_test "${MAKO_QWEN_IMAGE}" "${MAKO_QWEN_IMAGE_REF}" ${m})
     set_tests_properties(image_${m} PROPERTIES LABELS image SKIP_RETURN_CODE 77)
 endforeach()
+add_test(NAME image_edit COMMAND image_ref_test "${MAKO_QWEN_IMAGE}" "${MAKO_QWEN_IMAGE_EDIT_REF}" edit)
+set_tests_properties(image_edit PROPERTIES LABELS image SKIP_RETURN_CODE 77)
 # SDXL against the reference implementation's tensors (MAKO_SDXL_REF).
 add_executable(sdxl_ref_test sdxl_ref_test.cpp)
 target_link_libraries(sdxl_ref_test PRIVATE mako_imagegen mako_text glaze_headers)

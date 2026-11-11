@@ -97,6 +97,33 @@ kernel void dup_up_add(device const float* x [[buffer(0)]], device float* y [[bu
     y[(uint64_t(oy) * 2 * a.w + ox) * a.c_out + o] += x[(uint64_t(oy / 2) * a.w + ox / 2) * a.c + cc / a.repeats];
 }
 
+struct DownArgs {
+    uint h, w;        // the block's input
+    uint c_in, c_out; // its channels in and out
+    uint fs, ft;      // space and time factors (1 or 2)
+    uint group;       // c_in * ft * fs * fs / c_out
+};
+
+// The averaging shortcut of a residual VAE's down block: y[oy][ox][o] += the mean of x's (fs x fs) block over the
+// `group` consecutive entries of channel o's group, each entry (channel, time copy, i, j); a single frame fills the
+// last time copy, the ones before it are the zero frames padded in front. Grid (c_out, w / fs, h / fs).
+kernel void avg_down_add(device const float* x [[buffer(0)]], device float* y [[buffer(1)]],
+                         constant DownArgs& a [[buffer(2)]], uint3 gid [[thread_position_in_grid]])
+{
+    const uint o = gid.x, ox = gid.y, oy = gid.z, wo = a.w / a.fs, ho = a.h / a.fs;
+    if (o >= a.c_out || ox >= wo || oy >= ho)
+        return;
+    const uint per = a.ft * a.fs * a.fs;
+    float s = 0;
+    for (uint e = o * a.group; e < (o + 1) * a.group; ++e) {
+        const uint c = e / per, r = e % per, t = r / (a.fs * a.fs), q = r % (a.fs * a.fs);
+        if (t != a.ft - 1)
+            continue;
+        s += x[(uint64_t(oy * a.fs + q / a.fs) * a.w + ox * a.fs + q % a.fs) * a.c_in + c];
+    }
+    y[(uint64_t(oy) * wo + ox) * a.c_out + o] += s / float(a.group);
+}
+
 // Row softmax of scale * x, in place; one threadgroup per row.
 kernel void softmax_rows(device float* x [[buffer(0)]], constant float2& a [[buffer(1)]],
                          uint row [[threadgroup_position_in_grid]], uint tid [[thread_position_in_threadgroup]])
@@ -130,12 +157,13 @@ kernel void softmax_rows(device float* x [[buffer(0)]], constant float2& a [[buf
 // y[c][r] = x[r][col0 + c] for rows x cols of x (rows ldx apart). Grid (cols, rows).
 struct TransposeArgs {
     uint rows, cols, ldx, col0;
+    uint ldy; // y's row length: 0 for the tight one (rows transposed, cols copied)
 };
 kernel void transpose_f32(device const float* x [[buffer(0)]], device float* y [[buffer(1)]],
                           constant TransposeArgs& a [[buffer(2)]], uint2 gid [[thread_position_in_grid]])
 {
     if (gid.x < a.cols && gid.y < a.rows)
-        y[uint64_t(gid.x) * a.rows + gid.y] = x[uint64_t(gid.y) * a.ldx + a.col0 + gid.x];
+        y[uint64_t(gid.x) * (a.ldy ? a.ldy : a.rows) + gid.y] = x[uint64_t(gid.y) * a.ldx + a.col0 + gid.x];
 }
 
 // y[r][c] = x[r][col0 + c] for rows x cols of x (rows ldx apart). Grid (cols, rows).
@@ -143,7 +171,19 @@ kernel void copy_cols(device const float* x [[buffer(0)]], device float* y [[buf
                       constant TransposeArgs& a [[buffer(2)]], uint2 gid [[thread_position_in_grid]])
 {
     if (gid.x < a.cols && gid.y < a.rows)
-        y[uint64_t(gid.y) * a.cols + gid.x] = x[uint64_t(gid.y) * a.ldx + a.col0 + gid.x];
+        y[uint64_t(gid.y) * (a.ldy ? a.ldy : a.cols) + gid.x] = x[uint64_t(gid.y) * a.ldx + a.col0 + gid.x];
+}
+
+struct FillArgs {
+    uint rows, cols, ld, col0;
+    float value;
+};
+// y[r][col0 + c] = value for rows x cols (rows ld apart). Grid (cols, rows).
+kernel void fill_cols(device float* y [[buffer(0)]], constant FillArgs& a [[buffer(1)]],
+                      uint2 gid [[thread_position_in_grid]])
+{
+    if (gid.x < a.cols && gid.y < a.rows)
+        y[uint64_t(gid.y) * a.ld + a.col0 + gid.x] = a.value;
 }
 
 // Krea 2's transformer: RMS norms with per-step scales and shifts, gated residuals and attention outputs, and the text

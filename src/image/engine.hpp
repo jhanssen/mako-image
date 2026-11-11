@@ -77,7 +77,10 @@ public:
     // Whether a family generates on a canvas of at least Request::min_area pixels and resizes to the size asked.
     static bool generates_on_canvas(const std::string& family) { return family == "MiniMax-H3-Image"; }
     // Whether a family takes reference images (Request::references).
-    static bool takes_references(const std::string& family) { return family == "MiniMax-H3-Image"; }
+    static bool takes_references(const std::string& family)
+    {
+        return family == "MiniMax-H3-Image" || family == "Qwen-Image 2.1";
+    }
     // The largest image a family makes, in pixels.
     static uint64_t max_pixels(const std::string& family)
     {
@@ -284,6 +287,8 @@ private:
         std::vector<Res> res;
         bool down = false;
         Conv conv;
+        // The averaging shortcut (residual VAEs): the block's channels in and out, its space and time factors.
+        uint32_t cin = 0, cout = 0, fs = 1, ft = 1;
     };
     struct VaeEncoder {
         Conv in, out, quant, qkv, proj;
@@ -292,6 +297,10 @@ private:
         std::vector<Down> downs;
     };
     void load_encoder_kl();
+    // The Wan-style layout's encoder (Qwen-Image 2.1's: RMS norms, fused qkv, zero-padded stride-2 downsamplers, the
+    // averaging shortcut where the VAE is residual).
+    void load_encoder();
+    Res load_res(const std::string& prefix);
     std::unique_ptr<VaeEncoder> venc_;
     // A VAE tensor's name in the file (the Diffusers layout's, or the original one's).
     std::string vk(const std::string& name) const;

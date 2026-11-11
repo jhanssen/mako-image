@@ -49,6 +49,7 @@ target_link_libraries(mako_upscale PRIVATE mako_imagegen mako_app)
 # Model-backed tests need the models' directories and the references' tensors; without them they report as skipped.
 set(MAKO_QWEN_IMAGE "$ENV{MAKO_QWEN_IMAGE}" CACHE PATH "Qwen-Image 2.1 directory (its safetensors) for its tests")
 set(MAKO_QWEN_IMAGE_REF "$ENV{MAKO_QWEN_IMAGE_REF}" CACHE PATH "Qwen-Image 2.1 reference tensors for its tests")
+set(MAKO_QWEN_IMAGE_EDIT_REF "$ENV{MAKO_QWEN_IMAGE_EDIT_REF}" CACHE PATH "Qwen-Image 2.1 edit reference tensors (tools/dump_qwen_image_edit_ref.py)")
 set(MAKO_KREA2 "$ENV{MAKO_KREA2}" CACHE PATH "Krea 2 directory (its safetensors) for its tests")
 set(MAKO_KREA2_TRANSFORMER "$ENV{MAKO_KREA2_TRANSFORMER}" CACHE FILEPATH "Krea 2 transformer checkpoint for its tests")
 set(MAKO_KREA2_REF "$ENV{MAKO_KREA2_REF}" CACHE PATH "Krea 2 reference tensors for its tests")

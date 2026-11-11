@@ -252,9 +252,11 @@ uses unless told otherwise, at the scale shown.
 - `--color-map FILE`, `--depth-map FILE`, `--color-end F`, `--depth-end F`: control maps for a model with a control
   adapter (see "Layouts"; a draft's `color_map` / `depth_map` are passed by themselves).
 - `--layout DRAFT`: a MOSS-Image layout in place of size and prompt (see "Layouts").
-- `--reference FILE` (repeatable; MiniMax-H3-Image): a reference image for an edit or a composition. The prompt names
-  them `<Picture 1>`, `<Picture 2>`, ... in the order given; say what to keep from each, what to change, then
-  describe the whole target image. A render takes several and the model keeps what the prompt says to keep.
+- `--reference FILE` (repeatable; a model whose list entry says it takes reference images): a reference image for an
+  edit or a composition. MiniMax-H3-Image names them `<Picture 1>`, `<Picture 2>`, ... in the order given; say what
+  to keep from each, what to change, then describe the whole target image. Qwen-Image 2.1 names them `<image1>`,
+  `<image2>`, ... and takes an instruction ("Change the background to a sunset beach"). A render takes several and
+  the model keeps what the prompt says to keep.
 - `--min-area N` (MiniMax-H3-Image): the model generates on a canvas of at least N pixels (default 2048x2048, where
   it was trained, then resizes to the size asked for; its best work is 4 to 16 megapixels, e.g. 4096x4096,
   4736x3552, 5472x3072 asked for directly). `--min-area 0` renders at the size itself: a 512x512 draft in seconds,

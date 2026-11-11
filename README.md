@@ -116,15 +116,30 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   image files in base64 (or `data:` URLs; up to 16, 32 pixels a side to 16 megapixels each) the prompt names in that
   order as `<Picture 1>`, `<Picture 2>`, ... (an edit: say what to keep, what to change, then describe the whole
   target image), each taken at its own size (resized only when its short edge is outside 1024 to 2048 pixels), and
-  `min_generation_area`: the model generates on a canvas of at least this many pixels (default 4194304, 2048x2048,
+  `min_generation_area`. Qwen-Image 2.1 takes `references` too (its card: up to 10): the prompt is an instruction
+  ("Change the background to a sunset beach"; the template names the pictures `<image1>`, `<image2>`, ... for it),
+  each picture is resized to about 1024x1024 pixels' area at its aspect ratio (sides multiples of 32, as its
+  pipeline does), seen by the text encoder's vision tower over white and by the VAE encoder with its alpha, and its
+  latents go into the transformer's sequence where its vision tokens were, modulated at t = 0 like the text and
+  attended block-causally (a text row sees the rows before it, a picture's rows everything before their block's
+  end, the generated image everything); the prefix's keys and values are kept from the first step. Its pipeline
+  runs edits without guidance (`guidance_scale` 1) at the last picture's aspect ratio and 1024x1024 pixels' area;
+  `size` is yours to choose here. `min_generation_area`: the model generates on a canvas of at least this many pixels (default 4194304, 2048x2048,
   as released, where it was trained; 4 to 20 megapixels is its working range, best around 16: the card's 16 MP sizes
   are 4096x4096, 4736x3552, 5024x3360, 5472x3072, 6272x2688 and their portrait swaps, each side sqrt(16777216 x
   ratio) rounded to a multiple of 32) at the aspect ratio asked for and
   resizes the image to `size` (Lanczos); `0` generates at `size` itself (a 512x512 draft in 13 s instead of 37).
-  The PNG records the canvas (`Canvas`) and the number of references.
+  The PNG records the canvas (`Canvas`) and the number of references. Tried: edits of a 2048x1024
+  reference at 2048x1024 (`min_generation_area` 0), 2560x1280, 2656x1184, 2848x1376, 2848x1472, 2880x1440,
+  2944x1472, 3072x1024 and the default 2912x1440 canvas, clean photographs all but one: seed 7 at 2912x1440 came
+  out as a posterized copy (its rain streaks as white blobs, the rocks as cut-outs) on every prompt tried, while
+  seeds 8 and 123 there were clean; the layout agrees with ComfyUI's (area-normalized grids, one time slot a
+  reference, dense attention) and the edit tensor test passes at an odd 9x9-patch canvas too
+  (`MAKO_H3_DUMP_SIZE=288` for the dump), so that is the noise, not the engine: another seed.
 - One model is in memory at a time, loaded by the first request for it; a request for another model or other LoRAs
   than the loaded ones loads those first. `GET /v1/status` says which is loaded.
-- Time: Qwen-Image 2.1 ~13 s for 512x512, ~63 s for 1024x1024 (40 steps); Krea 2 Turbo ~5 s and ~23 s (8 steps);
+- Time: Qwen-Image 2.1 ~13 s for 512x512, ~63 s for 1024x1024 (40 steps), ~83 s for a 1440x736 edit with one
+  reference at 1024x1024 pixels' area (2 s a step after the first, no guidance); Krea 2 Turbo ~5 s and ~23 s (8 steps);
   MiniMax-H3-Image ~37 s for 1024x1024 (6 steps on its 2048x2048 canvas, 4.3 s a step, the first 14), ~13 s for
   512x512 generated at that size (`min_generation_area` 0);
   MOSS-Image ~32 s and ~145 s (50 steps, two passes each: 2.3 s a step cool, 3.4 s once warm); Anima Turbo 4.5 s for
@@ -180,6 +195,11 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   the image; `MAKO_IMAGE_URL` (default `http://127.0.0.1:8082/v1`) and `MAKO_IMAGE_API_KEY` point it at the server.
   The scene-3d skill (a repository of its own) builds a control model's maps from a 3D blockout of the scene in
   Blender and renders through this skill.
+- `tools/claude/edit-image` is a Claude Code skill (`ln -s "$PWD/tools/claude/edit-image" ~/.claude/skills/`) that
+  makes a new image from reference images and a prompt through the same scripts (its `scripts/` links to the pi
+  skill's): it reads the references, writes MiniMax-H3-Image's three-part edit prompt (definitions from each
+  `<Picture N>`, the target with a preservation clause per subject, then only what changes), renders with
+  `render.sh --reference`, and reads the result against the references.
 - Control (MOSS-Image, a model directory with `"control"`, a colour/depth control adapter such as
   darask0/MOSS-Image-color-depth-control): `control` in a request, `{"color": BASE64, "depth": BASE64, "color_end": F,
   "depth_end": F}`: a colour region map (a flat colour per subject) and a depth map (near white), each steering the
@@ -232,10 +252,16 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   transformer as it loads (Diffusers, PEFT and the checkpoint's split q / k / v names; H3 LoRAs trained in ComfyUI or
   Kohya tools name a fused `attn.qkv_proj` module, which is refused, and LoKr files are not read). Tried: the pDMD
   2-step distillation LoRA (pdmd2026's, trained on the video model, akhaliq's Diffusers-named repack for this one):
-  with `steps` 2 a finished 1024x1024 photograph where the plain 2 steps come out soft. The video model's other LoRAs
-  load but its weights sit 30-45% away from this model's.
-- Not yet: `/v1/images/edits` (MiniMax-H3-Image's references go through `references` of a generation), condition
-  images for the other models, and image to image for the other models (their VAEs' encoders).
+  at `steps` 2 a soft draft (smeared rocks and fur, a lighthouse doubled; the plain 2 steps are worse, and its card's
+  own full-size 2-step check looks the same: its sharp grids are 16 MP renders shown at a quarter size, its detail
+  pass 3 more steps), at `steps` 3 or 4 crisp, against the plain model's own 3 steps, which are clean and a little
+  softer. Tried and no help: the video model's shift-12 flow schedule its card samples with (second step at sigma
+  0.923 instead of the grid's 0.75: a lattice grain over the image) and the release's base head in place of the six
+  distilled ones (which sit within 2% of it: no visible change). The video model's other LoRAs load but its weights
+  sit 30-45% away from this model's.
+- Not yet: `/v1/images/edits` (references go through `references` of a generation), condition images for the other
+  models, and image to image for the other models (their VAEs' encoders; Qwen-Image 2.1's encoder is in for its
+  references, not yet wired to `image`).
 
 
 ## Tests
@@ -268,7 +294,12 @@ presentation (two reference pictures) within 5e-3 and its velocities within 4% (
 latents: the engine's F16 VAE encode of the references moves the output more than the transformer does). The edit
 tests pass the pipeline's resized reference pictures in and check the engine's Lanczos resize at the pixel level on
 its own (Qwen3-VL's vision tower moves 30% on the rounding differences between two Lanczos implementations over
-a smooth synthetic picture, so no resize but a bit-identical one keeps the tower's output comparable). `esrgan` compares the upscalers with PyTorch's output
+a smooth synthetic picture, so no resize but a bit-identical one keeps the tower's output comparable). Qwen-Image 2.1's
+edit path by `tools/dump_qwen_image_edit_ref.py` (`MAKO_QWEN_IMAGE_EDIT_REF`; the Diffusers implementation, the text
+encoder in fp32 on the CPU, the VAE and the transformer in fp32 on MPS, one synthetic RGBA picture at the pipeline's
+1184x896, a 256x256 target, two steps): the presentation's tokens exactly, the vision tower's features within 3e-3,
+the text embeddings with the picture within 1.1e-3, the encoder's latents within 4e-3, the velocities within 2%.
+`esrgan` compares the upscalers with PyTorch's output
 (spandrel's RRDBNet, fp32) for a 48x32 crop of a render: `MAKO_ESRGAN_REF/NAME/` holds `manifest.json` (`width`,
 `height`, `factor`), `input.f32` and `output.f32` (RGBA channels-last in [-1, 1]) for `MAKO_UPSCALERS/NAME.safetensors`,
 all at once and in 16-pixel tiles.

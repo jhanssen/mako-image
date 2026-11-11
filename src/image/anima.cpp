@@ -28,6 +28,7 @@ struct HeadsPartialArgs {
 struct AttnArgs {
     uint32_t n_q, q_pad, n_k, k_pad, heads, kv_heads, q_pos0, block, width;
     float scale;
+    uint32_t limits = 0; // 1: per-query key limits in buffer 5
 };
 
 safetensors::Files open_files(const std::string& path)
@@ -359,6 +360,7 @@ void Anima::begin(std::span<const float> prompt, uint32_t h, uint32_t w, uint32_
     };
     auto attend = [&](uint32_t nk, uint32_t k_pad) {
         const AttnArgs a{M, mq_pad, nk, k_pad, H, H, 0, 0, H * D, 1.0f / std::sqrt(float(D))};
+        enc->setBuffer(qh, 0, 5); // the kernel's key limits, unused here
         dispatch(enc, "flash_attn_coop_64_32", {qh, kh, vh, att}, &a, sizeof(a), MTL::Size(mq_pad / kAttnRows, H, 1),
                  MTL::Size(128, 1, 1), false);
     };

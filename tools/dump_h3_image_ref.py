@@ -23,7 +23,7 @@ PROMPT = ("A photograph of a red fox sitting in fresh snow in a pine forest at s
           "its breath visible in the cold air, pine branches heavy with snow behind it.")
 EDIT_PROMPT = ("Keep the scene of <Picture 1> as it is, but put the yellow disc of <Picture 2> in the sky as a sun. "
                "A smooth gradient landscape with a single disc and a bar, as a flat illustration.")
-SIZE = 256         # a 256x256 canvas: 16x16 latents, 8x8 = 64 transformer rows
+SIZE = int(os.environ.get("MAKO_H3_DUMP_SIZE", "256"))  # the square canvas: 256 is 16x16 latents, 8x8 = 64 rows
 SEED = 42
 TEXT_LAYER = 50
 PROBE_BLOCKS = (0, 1, 24, 49)

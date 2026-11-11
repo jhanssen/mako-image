@@ -24,6 +24,7 @@ struct HeadsArgs {
 struct AttnArgs {
     uint32_t n_q, q_pad, n_k, k_pad, heads, kv_heads, q_pos0, block, width;
     float scale;
+    uint32_t limits = 0; // 1: per-query key limits in buffer 5
 };
 struct LnArgs {
     uint32_t n;
@@ -452,6 +453,7 @@ void Sdxl::attend64(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* q, MTL::Buffe
 {
     const uint32_t q_pad = round_up(n_q, kQRows), k_pad = round_up(n_k, 128);
     const AttnArgs a{n_q, q_pad, n_k, k_pad, n_heads, n_heads, 0, block, n_heads * kD, 1.0f / std::sqrt(float(kD))};
+    enc->setBuffer(q, 0, 5); // the kernel's key limits, unused here
     dispatch(enc, "flash_attn_coop_64_32", {q, k, v, o}, &a, sizeof(a), MTL::Size(q_pad / kQRows, n_heads, 1),
              MTL::Size(128, 1, 1), false);
 }

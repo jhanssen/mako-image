@@ -18,7 +18,8 @@
 // its own size, at most 1024x1024 pixels' area); --strength: the share of the steps run on it (default 0.75).
 // --control: a MOSS-Image control adapter; --color-map (a flat colour per subject) and --depth-map (near white) steer
 // the layout, each for the first --color-end / --depth-end share of the steps (default 1).
-// --reference: a reference image (repeatable; MiniMax-H3-Image), <Picture 1>, <Picture 2>, ... in the prompt's order.
+// --reference: a reference image (repeatable; models that take them), <Picture 1>, <Picture 2>, ... in the prompt's
+//              order (MiniMax-H3-Image), <image1>, <image2>, ... (Qwen-Image 2.1).
 // --min-area: the smallest canvas, in pixels, a model that generates larger than asked uses (MiniMax-H3-Image:
 // 4194304, 2048x2048; 0: the size asked for). --vae: another file of the VAE's weights.
 // --upscale: an ESRGAN upscaler (tools/esrgan_to_safetensors.py) run on each image afterwards, to SCALE times the
@@ -98,7 +99,7 @@ int main(int argc, char** argv)
         .option("--transformer", "PATH", "another file or directory of the transformer's weights", transformer)
         .option("--adapter", "DIR", "a MOSS-Image data-space distillation adapter's directory", adapter)
         .option("--vae", "PATH", "another file of the VAE's weights", vae)
-        .option("--reference", "FILE", "a reference image (repeatable; MiniMax-H3-Image)",
+        .option("--reference", "FILE", "a reference image (repeatable; MiniMax-H3-Image, Qwen-Image 2.1)",
                 [&](const std::string& v) { references.push_back(v); })
         .option("--min-area", "N", "the smallest canvas in pixels (MiniMax-H3-Image; default the model's, 0 none)",
                 [&](const std::string& v) { min_area = mako::app::Cli::parse<uint32_t>(v); })

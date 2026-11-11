@@ -33,8 +33,15 @@ namespace {
 struct UpArgs {
     uint32_t h, w, c, c_out, ft, repeats;
 };
+struct DownArgs {
+    uint32_t h, w, c_in, c_out, fs, ft, group;
+};
 struct TransposeArgs {
-    uint32_t rows, cols, ldx, col0;
+    uint32_t rows, cols, ldx, col0, ldy;
+};
+struct FillArgs {
+    uint32_t rows, cols, ld, col0;
+    float value;
 };
 
 safetensors::Files open_files(const std::string& path)
@@ -586,20 +593,23 @@ std::string Engine::vk(const std::string& name) const
     return wan_ ? wan_name(name) : !ldm_.empty() ? ldm_ + ldm_name(name, ldm_levels_) : name;
 }
 
+Engine::Res Engine::load_res(const std::string& p)
+{
+    Res r;
+    r.g1 = upload(vae_files_, vk(p + ".norm1.gamma"), false);
+    r.g2 = upload(vae_files_, vk(p + ".norm2.gamma"), false);
+    r.c1 = load_conv(p + ".conv1", 3);
+    r.c2 = load_conv(p + ".conv2", 3);
+    if (vae_files_.find(vk(p + ".conv_shortcut.weight"))) {
+        r.sc = load_conv(p + ".conv_shortcut", 1);
+        r.shortcut = true;
+    }
+    return r;
+}
+
 void Engine::load_vae()
 {
-    auto res = [&](const std::string& p) {
-        Res r;
-        r.g1 = upload(vae_files_, vk(p + ".norm1.gamma"), false);
-        r.g2 = upload(vae_files_, vk(p + ".norm2.gamma"), false);
-        r.c1 = load_conv(p + ".conv1", 3);
-        r.c2 = load_conv(p + ".conv2", 3);
-        if (vae_files_.find(vk(p + ".conv_shortcut.weight"))) {
-            r.sc = load_conv(p + ".conv_shortcut", 1);
-            r.shortcut = true;
-        }
-        return r;
-    };
+    auto res = [&](const std::string& p) { return load_res(p); };
     post_quant_ = load_conv("post_quant_conv", 1);
     conv_in_ = load_conv("decoder.conv_in", 3);
     mid0_ = res("decoder.mid_block.resnets.0");
@@ -685,6 +695,47 @@ void Engine::load_encoder_kl()
     venc_ = std::move(e);
 }
 
+void Engine::load_encoder()
+{
+    if (kl_ || !ldm_.empty())
+        throw std::runtime_error(std::format("{}: no VAE encoder for this model's VAE yet", name()));
+    auto e = std::make_unique<VaeEncoder>();
+    auto vec = [&](const std::string& n) { return upload(vae_files_, vk(n), false); };
+    e->in = load_conv("encoder.conv_in", 3);
+    for (uint32_t i = 0;; ++i) {
+        const std::string p = std::format("encoder.down_blocks.{}", i);
+        if (!vae_files_.find(vk(p + ".resnets.0.conv1.weight")))
+            break;
+        Down d;
+        for (uint32_t j = 0; vae_files_.find(vk(std::format("{}.resnets.{}.conv1.weight", p, j))); ++j)
+            d.res.push_back(load_res(std::format("{}.resnets.{}", p, j)));
+        // A zero pad below and right, then a stride-2 3x3; the time convolution beside it never sees a second frame.
+        if (vae_files_.find(vk(p + ".downsampler.resample.1.weight"))) {
+            d.down = true;
+            d.conv = load_conv(p + ".downsampler.resample.1", 3);
+            d.conv.stride = 2;
+            d.conv.pad = 0;
+            d.fs = 2;
+            d.ft = vae_files_.find(vk(p + ".downsampler.time_conv.weight")) ? 2 : 1;
+        }
+        d.cin = d.res.front().c1.cin;
+        d.cout = d.down ? d.conv.cout : d.res.back().c2.cout;
+        e->downs.push_back(std::move(d));
+    }
+    e->mid0 = load_res("encoder.mid_block.resnets.0");
+    e->mid1 = load_res("encoder.mid_block.resnets.1");
+    const std::string a = "encoder.mid_block.attentions.0.";
+    e->attn_g = vec(a + "norm.gamma");
+    e->qkv = load_conv(a + "to_qkv", 1);
+    e->proj = load_conv(a + "proj", 1);
+    e->out_g = vec("encoder.norm_out.gamma");
+    e->out = load_conv("encoder.conv_out", 3);
+    e->quant = load_conv("quant_conv", 1);
+    if (e->quant.cout != 2 * z_)
+        throw std::runtime_error(std::format("vae: the encoder gives {} values a pixel, not {}", e->quant.cout, 2 * z_));
+    venc_ = std::move(e);
+}
+
 void Engine::load_vae_kl()
 {
     auto vec = [&](const std::string& n) { return upload_f32(vae_files_, vk(n)); };
@@ -755,22 +806,32 @@ void Engine::vae_attention(MTL::ComputeCommandEncoder*& enc, const Tensor& g, co
     else
         norm(enc, x, &g, t1, n, c, c, 1e-24f / float(c));
     conv(enc, qkv, t1, h, w, t2); // [n][3c]: q, k, v
+    // The keys padded to the GEMM's multiple of 32: their scores -inf (nothing after the softmax), their values 0.
+    const uint32_t kp = round_up(n, 32);
     MTL::Buffer* kc = scratch("v_k", uint64_t(n) * c * 4);
-    MTL::Buffer* vt = scratch("v_vt", uint64_t(n) * c * 4);
+    MTL::Buffer* vt = scratch("v_vt", uint64_t(kp) * c * 4);
     // Queries a pass, so the scores stay near 256 MB.
-    const uint32_t qn = std::min(n, std::max(256u, uint32_t((64ull << 20) / n) / 256 * 256));
-    MTL::Buffer* sc = scratch("v_s", uint64_t(qn) * n * 4);
-    const TransposeArgs ka{n, c, 3 * c, c}, va{n, c, 3 * c, 2 * c};
+    const uint32_t qn = std::min(n, std::max(256u, uint32_t((64ull << 20) / kp) / 256 * 256));
+    MTL::Buffer* sc = scratch("v_s", uint64_t(qn) * kp * 4);
+    const TransposeArgs ka{n, c, 3 * c, c, 0}, va{n, c, 3 * c, 2 * c, kp};
     dispatch(enc, "copy_cols", {t2, kc}, &ka, sizeof(ka), MTL::Size(c, n, 1), MTL::Size(256, 1, 1));
     dispatch(enc, "transpose_f32", {t2, vt}, &va, sizeof(va), MTL::Size(c, n, 1), MTL::Size(256, 1, 1));
+    if (kp > n) {
+        const FillArgs vz{c, kp - n, kp, n, 0.0f};
+        dispatch(enc, "fill_cols", {vt}, &vz, sizeof(vz), MTL::Size(kp - n, c, 1), MTL::Size(256, 1, 1));
+    }
     for (uint32_t q0 = 0; q0 < n; q0 += qn) {
         const uint32_t m = std::min(qn, n - q0);
         gemm_->encode(enc, gguf::Type::F32, c, n, m, kc, 0, halves(enc, t2, uint64_t(q0) * 3 * c * 4, m, c, 3 * c), 0,
-                      sc, 0);
+                      sc, 0, kp);
         after(enc, "vae scores");
-        const float sa[2] = {float(n), 1.0f / std::sqrt(float(c))};
+        if (kp > n) {
+            const FillArgs sz{m, kp - n, kp, n, -INFINITY};
+            dispatch(enc, "fill_cols", {sc}, &sz, sizeof(sz), MTL::Size(kp - n, m, 1), MTL::Size(256, 1, 1));
+        }
+        const float sa[2] = {float(kp), 1.0f / std::sqrt(float(c))};
         dispatch(enc, "softmax_rows", {sc}, sa, sizeof(sa), MTL::Size(m, 1, 1), MTL::Size(256, 1, 1), false);
-        gemm_->encode(enc, gguf::Type::F32, n, c, m, vt, 0, halves(enc, sc, 0, m, n, 0), 0, t1, uint64_t(q0) * c * 4);
+        gemm_->encode(enc, gguf::Type::F32, kp, c, m, vt, 0, halves(enc, sc, 0, m, kp, 0), 0, t1, uint64_t(q0) * c * 4);
         after(enc, "vae pv");
     }
     conv(enc, proj, t1, h, w, t3);
@@ -783,12 +844,13 @@ std::vector<float> Engine::encode(std::span<const float> rgba, uint32_t h, uint3
     if (rgba.size() != uint64_t(H) * W * 4)
         throw std::runtime_error(std::format("encode: the image must be [{}][{}][4]", H, W));
     if (!venc_)
-        load_encoder_kl();
+        kl_ ? load_encoder_kl() : load_encoder();
     const VaeEncoder& e = *venc_;
-    // The largest image: each level's widest channels at its size.
-    uint64_t most = uint64_t(H) * W * std::max(e.in.cin, e.in.cout);
+    // The largest image: each level's widest channels at its size; and the largest block input the shortcut keeps.
+    uint64_t most = uint64_t(H) * W * std::max(e.in.cin, e.in.cout), kept = 0;
     uint32_t hh = H, ww = W;
     for (const Down& d : e.downs) {
+        kept = std::max(kept, uint64_t(hh) * ww * d.cin);
         for (const Res& r : d.res)
             most = std::max(most, uint64_t(hh) * ww * std::max(r.c1.cin, r.c2.cout));
         if (d.down) {
@@ -803,6 +865,7 @@ std::vector<float> Engine::encode(std::span<const float> rgba, uint32_t h, uint3
     MTL::Buffer* b = scratch("v_b", most * 4);
     MTL::Buffer* t1 = scratch("v_t1", most * 4);
     MTL::Buffer* t2 = scratch("v_t2", most * 4);
+    MTL::Buffer* keep = residual_ ? scratch("v_keep", kept * 4) : nullptr;
     {
         auto* in = static_cast<float*>(a->contents());
         const uint32_t c = e.in.cin;
@@ -819,6 +882,11 @@ std::vector<float> Engine::encode(std::span<const float> rgba, uint32_t h, uint3
     hh = H;
     ww = W;
     for (const Down& d : e.downs) {
+        const uint32_t h0 = hh, w0 = ww;
+        if (residual_) { // the block's input, for the averaging shortcut
+            const uint32_t n = hh * ww * d.cin;
+            dispatch(enc, "copy_f32", {x, keep}, &n, sizeof(n), MTL::Size(n, 1, 1), MTL::Size(256, 1, 1));
+        }
         for (const Res& r : d.res) {
             res_block(enc, r, x, hh, ww, y, t1, t2);
             std::swap(x, y);
@@ -829,16 +897,20 @@ std::vector<float> Engine::encode(std::span<const float> rgba, uint32_t h, uint3
             hh /= 2;
             ww /= 2;
         }
+        if (residual_) {
+            const DownArgs da{h0, w0, d.cin, d.cout, d.fs, d.ft, d.cin * d.ft * d.fs * d.fs / d.cout};
+            dispatch(enc, "avg_down_add", {keep, x}, &da, sizeof(da), MTL::Size(d.cout, ww, hh), MTL::Size(64, 1, 1));
+        }
         probe(enc, "enc_down", int(&d - e.downs.data()), x,
               uint64_t(hh) * ww * (d.down ? d.conv.cout : d.res.back().c2.cout));
     }
     res_block(enc, e.mid0, x, hh, ww, y, t1, t2);
     std::swap(x, y);
-    vae_attention(enc, e.attn_g, &e.attn_b, e.qkv, e.proj, x, hh, ww, t1, t2, y);
+    vae_attention(enc, e.attn_g, kl_ ? &e.attn_b : nullptr, e.qkv, e.proj, x, hh, ww, t1, t2, y);
     res_block(enc, e.mid1, x, hh, ww, y, t1, t2);
     std::swap(x, y);
     probe(enc, "enc_mid", -1, x, uint64_t(hh) * ww * e.mid1.c2.cout);
-    norm_silu(enc, x, e.out_g, t1, hh * ww, e.out.cin, &e.out_b);
+    norm_silu(enc, x, e.out_g, t1, hh * ww, e.out.cin, kl_ ? &e.out_b : nullptr);
     conv(enc, e.out, t1, hh, ww, y);
     conv(enc, e.quant, y, hh, ww, x);
     enc->endEncoding();

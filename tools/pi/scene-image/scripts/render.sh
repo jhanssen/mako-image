@@ -17,8 +17,8 @@
 # the image's (at most 1024x1024 pixels' area). --color-map FILE (a flat colour per subject) and --depth-map FILE
 # (near white) steer the layout on a model with a control adapter, each for the first --color-end / --depth-end share
 # of the steps (0 to 1, default 1); a layout draft's color_map / depth_map are passed the same way. --reference FILE
-# (repeatable; MiniMax-H3-Image) gives a reference image the prompt names as <Picture 1>, <Picture 2>, ... in that
-# order; --min-area N the smallest canvas in pixels that model generates on (default the model's, 2048x2048; 0: the
+# (repeatable; models whose list entry says they take reference images) gives a reference image the prompt names as
+# <Picture 1>, <Picture 2>, ... (MiniMax-H3-Image) or <image1>, <image2>, ... (Qwen-Image 2.1) in that order; --min-area N the smallest canvas in pixels that model generates on (default the model's, 2048x2048; 0: the
 # size itself, faster and rougher). --upscale NAME
 # runs the server's ESRGAN upscaler NAME on the image (scripts/upscalers.sh lists them), to SCALE times the size
 # (default: the upscaler's own, 4 for most; the server resamples down from its output for less).

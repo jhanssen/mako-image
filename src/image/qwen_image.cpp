@@ -2,6 +2,7 @@
 
 #include "log/log.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -60,20 +61,13 @@ QwenImage::QwenImage(const std::string& dir, mtl::Context& ctx, const Options& o
         throw std::runtime_error("text encoder: not 4096 wide");
     load_transformer(open_files(opts.transformer.empty() ? dir + "/transformer" : opts.transformer));
     drop_ = uint32_t(tok_->encode("<|im_start|>system\n" + std::string(kSystem) + "<|im_end|>\n", true).size());
+    vision_dir_ = dir + "/text_encoder"; // the release's tower, whichever language model the text encoder is
 }
 
 std::string QwenImage::templated(const std::string& prompt)
 {
     return "<|im_start|>system\n" + std::string(kSystem) + "<|im_end|>\n<|im_start|>user\n" +
            (prompt.empty() ? " " : prompt) + "<|im_end|>\n<|im_start|>assistant\n";
-}
-
-std::vector<float> QwenImage::prompt_embeddings(const std::string& prompt)
-{
-    auto ids = tok_->encode(templated(prompt), true);
-    if (ids.size() > drop_ + kMaxPrompt) // cut at the end, as the reference's tokenizer does
-        ids.resize(drop_ + kMaxPrompt);
-    return encode_text(ids, drop_);
 }
 
 void QwenImage::load_transformer(const safetensors::Files& f)
@@ -110,6 +104,118 @@ void QwenImage::load_transformer(const safetensors::Files& f)
         throw std::runtime_error("transformer: no blocks");
 }
 
+std::pair<uint32_t, uint32_t> QwenImage::reference_size(uint32_t w, uint32_t h)
+{
+    const double ratio = double(w) / double(h), width = std::sqrt(double(kReferenceArea) * ratio);
+    auto side = [](double v) { return std::max<uint32_t>(32, uint32_t(std::lround(v / 32.0)) * 32); };
+    return {side(width), side(width / ratio)};
+}
+
+models::QwenVision& QwenImage::vision()
+{
+    if (!vision_)
+        vision_ = std::make_unique<models::QwenVision>(vision_dir_, ctx_, tel_);
+    return *vision_;
+}
+
+void QwenImage::set_references(const Request& r)
+{
+    refs_.clear();
+    slots_.clear();
+    for (size_t i = 0; i < r.references.size(); ++i) {
+        const Request::Reference& src = r.references[i];
+        if (!src.width || !src.height || src.rgba.size() != uint64_t(src.width) * src.height * 4)
+            throw std::runtime_error(std::format("reference {}: RGBA [height][width][4]", i + 1));
+        const auto [w, h] = reference_size(src.width, src.height);
+        std::vector<float> sized;
+        std::span<const float> rgba = src.rgba;
+        if (w != src.width || h != src.height) {
+            sized = resize_image(src.rgba, src.width, src.height, w, h);
+            rgba = sized;
+        }
+        // The vision tower sees the picture over white, the VAE all four channels.
+        std::vector<uint8_t> rgb(uint64_t(w) * h * 3);
+        for (uint64_t p = 0; p < uint64_t(w) * h; ++p) {
+            const float a = std::clamp(rgba[p * 4 + 3] * 0.5f + 0.5f, 0.0f, 1.0f);
+            for (uint32_t c = 0; c < 3; ++c) {
+                const float v = std::clamp(rgba[p * 4 + c] * 0.5f + 0.5f, 0.0f, 1.0f);
+                rgb[p * 3 + c] = uint8_t(std::lround((v * a + 1.0f - a) * 255.0f));
+            }
+        }
+        Ref ref;
+        ref.lh = h / 16;
+        ref.lw = w / 16;
+        ref.features = vision().encode(rgb, h, w);
+        if (ref.features.rows * 2 != ref.lh || ref.features.cols * 2 != ref.lw)
+            throw std::logic_error("a vision token covers 2x2 latents");
+        ref.latents = encode(rgba, ref.lh, ref.lw);
+        refs_.push_back(std::move(ref));
+    }
+}
+
+void QwenImage::set_reference_latents(size_t i, std::vector<float> latents)
+{
+    Ref& r = refs_.at(i);
+    if (latents.size() != uint64_t(r.lh) * r.lw * kLatent)
+        throw std::runtime_error(std::format("reference {}: latents [{}][{}][64]", i + 1, r.lh, r.lw));
+    r.latents = std::move(latents);
+}
+
+std::vector<float> QwenImage::prompt_embeddings(const std::string& prompt)
+{
+    slots_.clear();
+    if (refs_.empty()) {
+        auto ids = tok_->encode(templated(prompt), true);
+        if (ids.size() > drop_ + kMaxPrompt) // cut at the end, as the reference's tokenizer does
+            ids.resize(drop_ + kMaxPrompt);
+        ids_ = ids;
+        return encode_text(ids, drop_);
+    }
+    // The reference's template for pictures: each as "<imageN>" and a vision block before the prompt. The pad
+    // tokens' rows leave the embeddings (the transformer puts the picture's latents there); where each went is kept.
+    auto special = [&](const char* name) {
+        const auto v = tok_->encode(name, true);
+        if (v.size() != 1)
+            throw std::runtime_error(std::format("the tokenizer has no {} token", name));
+        return v[0];
+    };
+    auto ids = tok_->encode("<|im_start|>system\n" + std::string(kSystem) + "<|im_end|>\n<|im_start|>user\n", true);
+    std::vector<models::QwenText::Vision> blocks;
+    std::vector<std::pair<uint32_t, uint32_t>> pads; // each picture's pad rows: the first, how many
+    for (size_t i = 0; i < refs_.size(); ++i) {
+        const auto label = tok_->encode(std::format("{}<image{}>", i ? " " : "", i + 1), false);
+        ids.insert(ids.end(), label.begin(), label.end());
+        ids.push_back(special("<|vision_start|>"));
+        const models::QwenVision::Features& f = refs_[i].features;
+        const uint32_t n = f.rows * f.cols;
+        models::QwenText::Vision b;
+        b.first = uint32_t(ids.size());
+        b.rows = f.rows;
+        b.cols = f.cols;
+        b.embeds = f.embeds;
+        for (const auto& d : f.deepstack)
+            b.deepstack.emplace_back(d);
+        blocks.push_back(std::move(b));
+        pads.emplace_back(uint32_t(ids.size()), n);
+        ids.insert(ids.end(), n, special("<|image_pad|>"));
+        ids.push_back(special("<|vision_end|>"));
+    }
+    const auto tail = tok_->encode((prompt.empty() ? " " : prompt) + "<|im_end|>\n<|im_start|>assistant\n", true);
+    ids.insert(ids.end(), tail.begin(), tail.end());
+    ids_ = ids;
+    const auto all = encode_text(ids, drop_, {}, false, blocks); // the rows from drop_ on
+    std::vector<float> out;
+    out.reserve(all.size());
+    uint32_t at = drop_;
+    for (const auto& [first, n] : pads) {
+        out.insert(out.end(), all.begin() + uint64_t(at - drop_) * kDim, all.begin() + uint64_t(first - drop_) * kDim);
+        slots_.push_back(uint32_t(out.size() / kDim));
+        at = first + n;
+    }
+    out.insert(out.end(), all.begin() + uint64_t(at - drop_) * kDim, all.end());
+    return out;
+}
+
 void QwenImage::begin(std::span<const float> prompt, uint32_t h, uint32_t w, uint32_t slot)
 {
     if (slot > 1)
@@ -117,28 +223,62 @@ void QwenImage::begin(std::span<const float> prompt, uint32_t h, uint32_t w, uin
     Text& g = texts_[slot];
     if (prompt.empty() || prompt.size() % kDim)
         throw std::runtime_error("prompt embeddings must be rows of 4096");
+    if (slots_.size() != refs_.size())
+        throw std::runtime_error("the prompt embeddings do not place the references (prompt_embeddings() does)");
     g.S = uint32_t(prompt.size() / kDim);
     gh_ = h;
     gw_ = w;
     g.steps = 0;
     g.prompt.assign(prompt.begin(), prompt.end());
+    // The prefix: the prompt's rows with each reference's latent rows at its slot.
+    g.segments.clear();
+    uint32_t row = 0, at = 0;
+    for (size_t i = 0; i < refs_.size(); ++i) {
+        const uint32_t to = std::min(slots_[i], g.S);
+        if (to > at) {
+            g.segments.push_back({false, row, to - at, at});
+            row += to - at;
+            at = to;
+        }
+        const uint32_t n = refs_[i].lh * refs_[i].lw;
+        g.segments.push_back({true, row, n, uint32_t(i)});
+        row += n;
+    }
+    if (g.S > at) {
+        g.segments.push_back({false, row, g.S - at, at});
+        row += g.S - at;
+    }
+    g.P = row;
     g.k.clear();
     g.v.clear();
     for (size_t b = 0; b < blocks_.size(); ++b) {
-        const uint64_t bytes = uint64_t(kHeads) * g.S * kHeadDim * 2;
+        const uint64_t bytes = uint64_t(kHeads) * g.P * kHeadDim * 2;
         g.k.emplace_back(ctx_.device()->newBuffer(bytes, MTL::ResourceStorageModeShared));
         g.v.emplace_back(ctx_.device()->newBuffer(bytes, MTL::ResourceStorageModeShared));
     }
-    // Text positions advance on all three axes; the image block takes the next frame position and a height / width
-    // grid centred on zero.
-    MTL::Buffer* cs = scratch(std::format("d_cs{}", slot), uint64_t(g.S + h * w) * kHeadDim / 2 * 8);
+    // Rotary positions: text rows advance a shared position on all three axes; an image block (a reference, and the
+    // generated image last) takes the frame position next with a height / width grid centred on zero, and advances
+    // the position by its larger side.
+    const uint32_t N = h * w;
+    MTL::Buffer* cs = scratch(std::format("d_cs{}", slot), uint64_t(g.P + N) * kHeadDim / 2 * 8);
     auto* c = static_cast<float*>(cs->contents());
-    for (uint32_t t = 0; t < g.S; ++t)
-        rope3(c + uint64_t(t) * kHeadDim, t, t, t);
-    for (uint32_t y = 0; y < h; ++y)
-        for (uint32_t x = 0; x < w; ++x)
-            rope3(c + uint64_t(g.S + y * w + x) * kHeadDim, g.S, int64_t(y) - int64_t(h - h / 2),
-                  int64_t(x) - int64_t(w - w / 2));
+    int64_t pos = 0;
+    auto grid = [&](uint32_t row0, uint32_t gh, uint32_t gw) {
+        for (uint32_t y = 0; y < gh; ++y)
+            for (uint32_t x = 0; x < gw; ++x)
+                rope3(c + uint64_t(row0 + y * gw + x) * kHeadDim, pos, int64_t(y) - int64_t(gh - gh / 2),
+                      int64_t(x) - int64_t(gw - gw / 2));
+        pos += std::max(gh, gw);
+    };
+    for (const Segment& sg : g.segments) {
+        if (sg.image) {
+            grid(sg.row0, refs_[sg.src].lh, refs_[sg.src].lw);
+        } else {
+            for (uint32_t t = 0; t < sg.n; ++t, ++pos)
+                rope3(c + uint64_t(sg.row0 + t) * kHeadDim, pos, pos, pos);
+        }
+    }
+    grid(g.P, h, w);
 }
 
 std::vector<float> QwenImage::step(std::span<const float> latents, float sigma, uint32_t slot)
@@ -150,9 +290,10 @@ std::vector<float> QwenImage::step(std::span<const float> latents, float sigma, 
     if (latents.size() != uint64_t(N) * kLatent)
         throw std::runtime_error("latents must be [h * w][64]");
     const bool first = g.steps++ == 0;
-    // The first step runs the text rows too; later ones only the image's, against the text's cached keys and values.
-    const uint32_t S = g.S, T = first ? S + N : N, row0 = first ? 0 : S, n_k = S + N;
-    const uint32_t q_pad = round_up(T, kAttnRows), k_pad = round_up(n_k, 128), split = first ? S : 0;
+    // The first step runs the prefix rows too (the prompt's and the references'); later ones only the image's,
+    // against the prefix's cached keys and values.
+    const uint32_t S = g.S, P = g.P, T = first ? P + N : N, row0 = first ? 0 : P, n_k = P + N;
+    const uint32_t q_pad = round_up(T, kAttnRows), k_pad = round_up(n_k, 128), split = first ? P : 0;
     // The GEMMs run a multiple of 256 rows (the rest ignored): fewer rows, as the first step's text and image make,
     // would take 64-row tiles that read the weights four times as often (that step took twice as long).
     const uint32_t Tg = T > 256 ? round_up(T, 256) : T;
@@ -174,9 +315,9 @@ std::vector<float> QwenImage::step(std::span<const float> latents, float sigma, 
     MTL::Buffer* temb_s = scratch("d_temb_s", 2 * D * 4);
     MTL::Buffer* mod = scratch("d_mod", 2 * 4 * D * 4);
     MTL::Buffer* omod = scratch("d_omod", 2 * D * 4);
-    MTL::Buffer* cs = scratch(std::format("d_cs{}", slot), uint64_t(S + N) * kHeadDim / 2 * 8);
+    MTL::Buffer* cs = scratch(std::format("d_cs{}", slot), uint64_t(P + N) * kHeadDim / 2 * 8);
     std::memcpy(lat->contents(), latents.data(), latents.size() * 4);
-    // Sinusoidal timestep embeddings (cos half first) of 1000 * sigma and of 0, the text's.
+    // Sinusoidal timestep embeddings (cos half first) of 1000 * sigma and of 0, the prefix's.
     auto* tpf = static_cast<float*>(tp->contents());
     for (int r = 0; r < 2; ++r)
         for (uint32_t i = 0; i < kTimeDim / 2; ++i) {
@@ -185,9 +326,26 @@ std::vector<float> QwenImage::step(std::span<const float> latents, float sigma, 
             tpf[r * kTimeDim + i] = std::cos(arg);
             tpf[r * kTimeDim + kTimeDim / 2 + i] = std::sin(arg);
         }
+    std::vector<MTL::Buffer*> ref_lat(refs_.size(), nullptr);
+    MTL::Buffer* limits = nullptr;
     if (first) {
         MTL::Buffer* pr = scratch("d_prompt", uint64_t(S) * D * 4);
         std::memcpy(pr->contents(), g.prompt.data(), g.prompt.size() * 4);
+        for (size_t i = 0; i < refs_.size(); ++i) {
+            ref_lat[i] = scratch(std::format("d_ref{}", i), refs_[i].latents.size() * 4);
+            std::memcpy(ref_lat[i]->contents(), refs_[i].latents.data(), refs_[i].latents.size() * 4);
+        }
+        // What each query row sees: a text row the rows before it, a reference's rows those before their block's
+        // end, the image's rows everything (without references the kernel's own rule says the same).
+        if (!refs_.empty()) {
+            limits = scratch("d_limits", uint64_t(q_pad) * 4);
+            auto* l = static_cast<uint32_t*>(limits->contents());
+            for (const Segment& sg : g.segments)
+                for (uint32_t i = 0; i < sg.n; ++i)
+                    l[sg.row0 + i] = sg.image ? sg.row0 + sg.n : sg.row0 + i + 1;
+            for (uint32_t i = P; i < q_pad; ++i)
+                l[i] = n_k;
+        }
     }
 
     MTL::CommandBuffer* cb = ctx_.queue()->commandBuffer();
@@ -204,13 +362,21 @@ std::vector<float> QwenImage::step(std::span<const float> latents, float sigma, 
     probe(enc, "modulation", -1, mod, 2 * 4 * D);
     proj(enc, out_lin_, temb_s, 0, omod, 0, 2);
     if (first) {
+        // The prompt rows through the text projection, each segment to its rows; a reference's latents through the
+        // image projection to theirs.
         MTL::Buffer* pr = scratch("d_prompt", uint64_t(S) * D * 4);
         norm(enc, pr, &txt_norm_, xn, S, D, D, kEps);
         proj(enc, txt_in1_, xn, 0, y, 0, S);
         uint32_t n = S * D;
         dispatch(enc, "gelu_tanh", {y}, &n, sizeof(n), MTL::Size(n, 1, 1), MTL::Size(256, 1, 1));
-        proj(enc, txt_in2_, y, 0, x, 0, S);
-        probe(enc, "txt_in", -1, x, uint64_t(S) * D);
+        for (const Segment& sg : g.segments) {
+            if (sg.image)
+                proj(enc, img_in_, ref_lat[sg.src], 0, x, uint64_t(sg.row0) * D * 4, sg.n);
+            else
+                proj(enc, txt_in2_, y, uint64_t(sg.src) * D * 4, x, uint64_t(sg.row0) * D * 4, sg.n);
+        }
+        if (refs_.empty())
+            probe(enc, "txt_in", -1, x, uint64_t(S) * D);
     }
     proj(enc, img_in_, lat, 0, x, uint64_t(T - N) * D * 4, N);
     probe(enc, "img_in", -1, x, uint64_t(N) * D, uint64_t(T - N) * D * 4);
@@ -248,17 +414,17 @@ std::vector<float> QwenImage::step(std::span<const float> latents, float sigma, 
         enc->setBytes(&ha, sizeof(ha), 3);
         enc->dispatchThreads(MTL::Size(kHeadDim / 2, T, kHeads), MTL::Size(64, 1, 1));
         after(enc, "heads_half");
-        HeadRowsArgs hr{kHeadDim, k_pad, S, S};
-        if (first) { // keep the text's keys and values
-            dispatch(enc, "heads_rows", {kh, g.k[il].get()}, &hr, sizeof(hr), MTL::Size(kHeadDim, S, kHeads),
+        HeadRowsArgs hr{kHeadDim, k_pad, P, P};
+        if (first) { // keep the prefix's keys and values
+            dispatch(enc, "heads_rows", {kh, g.k[il].get()}, &hr, sizeof(hr), MTL::Size(kHeadDim, P, kHeads),
                      MTL::Size(128, 1, 1));
-            dispatch(enc, "heads_rows", {vh, g.v[il].get()}, &hr, sizeof(hr), MTL::Size(kHeadDim, S, kHeads),
+            dispatch(enc, "heads_rows", {vh, g.v[il].get()}, &hr, sizeof(hr), MTL::Size(kHeadDim, P, kHeads),
                      MTL::Size(128, 1, 1));
         } else {
-            hr = {kHeadDim, S, k_pad, S};
-            dispatch(enc, "heads_rows", {g.k[il].get(), kh}, &hr, sizeof(hr), MTL::Size(kHeadDim, S, kHeads),
+            hr = {kHeadDim, P, k_pad, P};
+            dispatch(enc, "heads_rows", {g.k[il].get(), kh}, &hr, sizeof(hr), MTL::Size(kHeadDim, P, kHeads),
                      MTL::Size(128, 1, 1));
-            dispatch(enc, "heads_rows", {g.v[il].get(), vh}, &hr, sizeof(hr), MTL::Size(kHeadDim, S, kHeads),
+            dispatch(enc, "heads_rows", {g.v[il].get(), vh}, &hr, sizeof(hr), MTL::Size(kHeadDim, P, kHeads),
                      MTL::Size(128, 1, 1));
         }
         if (k_pad > n_k) {
@@ -268,7 +434,7 @@ std::vector<float> QwenImage::step(std::span<const float> latents, float sigma, 
             dispatch(enc, "heads_clear", {vh}, c, sizeof(c), MTL::Size(kHeadDim, k_pad - n_k, kHeads),
                      MTL::Size(128, 1, 1));
         }
-        attention(enc, qh, kh, vh, att, T, q_pad, n_k, k_pad, kHeads, kHeads, row0, S);
+        attention(enc, qh, kh, vh, att, T, q_pad, n_k, k_pad, kHeads, kHeads, row0, split, kHeadDim, limits);
         proj(enc, B.o, att, 0, y, 0, Tg);
         ma.mod_off = D;
         dispatch(enc, "gate_add", {x, y, mod}, &ma, sizeof(ma), MTL::Size(D, T, 1), MTL::Size(256, 1, 1));

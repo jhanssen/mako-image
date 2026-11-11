@@ -225,6 +225,143 @@ int main(int argc, char** argv)
         const Diff d = diff(planar, read_f32(ref / "vae_out.f32"), px);
         check(d.rel < 0.05, std::format("{}x{}, {} steps: rel error {:.2e}, lowest channel cosine {:.5f} ({:.0f} ms)",
                                         size, size, r.steps, d.rel, d.min_cos, ms));
+    } else if (mode == "edit") {
+        // The edit path against tools/dump_qwen_image_edit_ref.py: the reference picture as the pipeline resized it
+        // goes in, so the encoders see its pixels exactly; the VAE encoder, the text encoder with the picture (its
+        // pad rows dropped from the reference's), then the transformer on the reference's text and latents.
+        mako::mtl::Context ctx;
+        mako::image::QwenImage engine(model.string(), ctx);
+        const auto& m = manifest;
+        const uint32_t size = uint32_t(m["size"].get_number()), g = size / 16, N = g * g;
+        const auto& rs = m["ed_ref0_source_size"].get_array();
+        const auto& es = m["ed_ref0_size"].get_array();
+        const uint32_t ew = uint32_t(es[0].get_number()), eh = uint32_t(es[1].get_number());
+        const auto [gw, gh] = mako::image::QwenImage::reference_size(uint32_t(rs[0].get_number()),
+                                                                     uint32_t(rs[1].get_number()));
+        check(gw == ew && gh == eh, std::format("the reference's size: {}x{} (the pipeline's {}x{})", gw, gh, ew, eh));
+        const std::string u8 = read_file(ref / "ed_ref0.u8");
+        std::vector<float> rgba(u8.size());
+        for (size_t i = 0; i < u8.size(); ++i)
+            rgba[i] = float(uint8_t(u8[i])) / 127.5f - 1.0f;
+        mako::image::Engine::Request r;
+        r.prompt = m["ed_prompt"].get_string();
+        r.width = r.height = size;
+        r.references.push_back({ew, eh, rgba});
+        engine.set_references(r);
+        {
+            const auto want_z = read_f32(ref / "ed_ref0_latents.f32");
+            const auto got_z = engine.reference_latents(0);
+            if (got_z.size() != want_z.size()) {
+                check(false, std::format("reference latents: {} values, the reference {}", got_z.size(), want_z.size()));
+            } else {
+                const Diff d = diff(std::vector<float>(got_z.begin(), got_z.end()), want_z, 64);
+                check(d.rel < 2e-2, std::format("reference latents (the VAE encoder): rel error {:.2e}, lowest row cosine {:.5f}", d.rel, d.min_cos));
+            }
+        }
+        const auto full = read_f32(ref / "ed_text_embeds.f32");
+        const auto mask = read_f32(ref / "ed_pad_mask.f32");
+        std::vector<float> want_text;
+        for (size_t row = 0; row < mask.size(); ++row)
+            if (mask[row] == 0.0f)
+                want_text.insert(want_text.end(), full.begin() + ptrdiff_t(row) * 4096, full.begin() + ptrdiff_t(row + 1) * 4096);
+        {
+            const auto got_text = engine.prompt_embeddings(r.prompt);
+            // The presentation's tokens against the pipeline's.
+            std::vector<int32_t> want_ids;
+            for (const auto& v : m["ed_ids"].get_array())
+                want_ids.push_back(int32_t(v.get_number()));
+            const auto& got_ids = engine.presentation();
+            size_t first_diff = 0;
+            while (first_diff < got_ids.size() && first_diff < want_ids.size() && got_ids[first_diff] == want_ids[first_diff])
+                ++first_diff;
+            check(got_ids == want_ids, std::format("the presentation: {} tokens (the pipeline's {}), the same up to token {}",
+                                                   got_ids.size(), want_ids.size(), first_diff));
+            // The vision tower's features and the DeepStack ones.
+            const auto& f = engine.reference_features(0);
+            {
+                const auto want_v = read_f32(ref / "ed_vis_merger.f32");
+                if (f.embeds.size() != want_v.size()) {
+                    check(false, std::format("vision features: {} values, the reference {}", f.embeds.size(), want_v.size()));
+                } else {
+                    const Diff d = diff(f.embeds, want_v, f.embeds.size() / (size_t(f.rows) * f.cols));
+                    check(d.rel < 5e-2, std::format("vision features: rel error {:.2e}, lowest row cosine {:.5f}", d.rel, d.min_cos));
+                }
+                for (size_t j = 0; j < f.deepstack.size(); ++j) {
+                    const auto want_d = read_f32(ref / std::format("ed_vis_deepstack{}.f32", j));
+                    if (f.deepstack[j].size() != want_d.size()) {
+                        check(false, std::format("deepstack {}: {} values, the reference {}", j, f.deepstack[j].size(), want_d.size()));
+                        continue;
+                    }
+                    const Diff d = diff(f.deepstack[j], want_d, want_d.size() / (size_t(f.rows) * f.cols));
+                    check(d.rel < 5e-2, std::format("deepstack {}: rel error {:.2e}, lowest row cosine {:.5f}", j, d.rel, d.min_cos));
+                }
+            }
+            if (got_text.size() != want_text.size()) {
+                check(false, std::format("text embeddings: {} rows, the reference {}", got_text.size() / 4096, want_text.size() / 4096));
+            } else {
+                const Diff d = diff(got_text, want_text, 4096);
+                check(d.rel < 5e-2, std::format("text embeddings with the picture: rel error {:.2e}, lowest row cosine {:.5f}", d.rel, d.min_cos));
+                // The rows before the picture (which see no picture) and after it.
+                const size_t slot = size_t(m["ed_slots"].get_array()[0].get_number()) * 4096;
+                const Diff before = diff(std::vector<float>(got_text.begin(), got_text.begin() + ptrdiff_t(slot)),
+                                         std::vector<float>(want_text.begin(), want_text.begin() + ptrdiff_t(slot)), 4096);
+                const Diff after = diff(std::vector<float>(got_text.begin() + ptrdiff_t(slot), got_text.end()),
+                                        std::vector<float>(want_text.begin() + ptrdiff_t(slot), want_text.end()), 4096);
+                std::println("       before the picture: rel error {:.2e}, lowest row cosine {:.5f}; after: rel error {:.2e}, lowest row cosine {:.5f}",
+                             before.rel, before.min_cos, after.rel, after.min_cos);
+                // Row by row before the picture, with the picture's tokens as plain pad tokens too (those rows see
+                // no picture either way).
+                const auto plain = engine.encode_text(engine.presentation(), uint32_t(m["ed_drop_idx"].get_number()));
+                for (size_t row = 0; row < slot / 4096; ++row) {
+                    auto cosine = [&](const std::vector<float>& a, size_t ar, const std::vector<float>& b, size_t br) {
+                        double ab = 0, aa = 0, bb = 0;
+                        for (size_t i = 0; i < 4096; ++i) {
+                            ab += double(a[ar * 4096 + i]) * b[br * 4096 + i];
+                            aa += double(a[ar * 4096 + i]) * a[ar * 4096 + i];
+                            bb += double(b[br * 4096 + i]) * b[br * 4096 + i];
+                        }
+                        return ab / std::sqrt(aa * bb);
+                    };
+                    std::println("       row {}: with the picture {:.4f}, as plain tokens {:.4f}", row, cosine(got_text, row, want_text, row),
+                                 cosine(plain, row, want_text, row));
+                }
+            }
+        }
+        engine.set_reference_latents(0, read_f32(ref / "ed_ref0_latents.f32"));
+        const uint32_t steps = uint32_t(m["ed_steps"].get_number());
+        const auto sig = engine.sigmas(steps, N);
+        const auto& ws = m["ed_sigmas"].get_array();
+        double worst = 0;
+        for (size_t i = 0; i < ws.size() && i < sig.size(); ++i)
+            worst = std::max(worst, std::abs(double(sig[i]) - ws[i].get_number()));
+        check(sig.size() == ws.size() && worst < 1e-5, std::format("{} noise levels, largest difference {:.1e}", sig.size(), worst));
+        std::map<std::string, std::vector<float>> got;
+        uint32_t step = 0;
+        engine.set_probe([&](const std::string& name, int layer, const float* data, size_t n) {
+            got[std::format("s{}_{}{}", step, name, layer >= 0 ? std::to_string(layer) : "")].assign(data, data + n);
+        });
+        engine.begin(want_text, g, g);
+        for (step = 0; step < steps; ++step) {
+            const auto t0 = std::chrono::steady_clock::now();
+            const auto pred = engine.step(read_f32(ref / std::format("ed_step{}_latents.f32", step)), float(ws[step].get_number()));
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            const auto want_p = read_f32(ref / std::format("ed_step{}_pred.f32", step));
+            const Diff d = diff(pred, want_p, 64);
+            check(d.rel < 0.05, std::format("step {} (sigma {:.3f}) prediction: rel error {:.2e}, lowest row cosine {:.4f} ({:.0f} ms)",
+                                            step, ws[step].get_number(), d.rel, d.min_cos, ms));
+            // The joint sequence's rows the engine ran this step (all of them at the first, the image's after).
+            for (const char* name : {"block0", "block1", "block15", "block31", "norm_out"}) {
+                const auto it = got.find(std::format("s{}_{}", step, name));
+                auto want_s = read_f32(ref / std::format("ed_s{}_{}.f32", step, name));
+                if (it == got.end() || it->second.size() > want_s.size() || it->second.size() % 4096) {
+                    check(false, std::format("{}: {} values, the reference {}", name, it == got.end() ? 0 : it->second.size(), want_s.size()));
+                    continue;
+                }
+                want_s.erase(want_s.begin(), want_s.end() - ptrdiff_t(it->second.size()));
+                const Diff ds = diff(it->second, want_s, 4096);
+                std::println("  {:4} s{}_{}: rel error {:.2e}, lowest row cosine {:.5f}", "", step, name, ds.rel, ds.min_cos);
+            }
+        }
     } else {
         std::println(stderr, "unknown mode {}", mode);
         return 2;
