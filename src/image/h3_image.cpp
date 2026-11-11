@@ -414,8 +414,11 @@ uint32_t H3Image::add_lora(const Lora& l)
 {
     if (l.merge == false)
         throw std::runtime_error("MiniMax-H3-Image keeps no LoRA unmerged");
+    if (!std::filesystem::exists(l.path))
+        throw std::runtime_error(l.path + ": no such LoRA file");
     loras_.push_back(l);
-    return transformer().add_lora(l.path, l.scale, true);
+    // merged into the transformer as it loads, else now
+    return dit_ ? dit_->add_lora(l.path, l.scale, true) : 0;
 }
 
 } // namespace mako::image

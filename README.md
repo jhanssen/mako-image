@@ -229,7 +229,11 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   `<Picture N>`, then `The target image shows ...` with one preservation clause per subject, then only what
   changes; the first 4096 tokens; up to 16 references by the card). Its own schedule: six Euler steps on a sigma
   grid, each through its own output head, other counts interpolating the grid, no guidance; LoRAs merge into the
-  transformer (none tried; the video model's load but its weights sit 30-45% away from this model's).
+  transformer as it loads (Diffusers, PEFT and the checkpoint's split q / k / v names; H3 LoRAs trained in ComfyUI or
+  Kohya tools name a fused `attn.qkv_proj` module, which is refused, and LoKr files are not read). Tried: the pDMD
+  2-step distillation LoRA (pdmd2026's, trained on the video model, akhaliq's Diffusers-named repack for this one):
+  with `steps` 2 a finished 1024x1024 photograph where the plain 2 steps come out soft. The video model's other LoRAs
+  load but its weights sit 30-45% away from this model's.
 - Not yet: `/v1/images/edits` (MiniMax-H3-Image's references go through `references` of a generation), condition
   images for the other models, and image to image for the other models (their VAEs' encoders).
 

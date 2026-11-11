@@ -36,6 +36,7 @@ public:
     // to.
     std::vector<float> decode(std::span<const float> latents, uint32_t h, uint32_t w) override;
     std::vector<float> encode(std::span<const float> rgba, uint32_t h, uint32_t w) override;
+    // Recorded for the transformer to merge as it loads (merged at once when it is loaded; the file must exist).
     uint32_t add_lora(const Lora& l) override;
 
     static constexpr uint32_t kMinArea = 2048 * 2048, kMaxTokens = 4096, kTextLayer = 50;
