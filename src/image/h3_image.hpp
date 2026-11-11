@@ -77,7 +77,8 @@ private:
     std::vector<Ref> refs_;
     std::vector<float> cond_rows_; // the references' latent rows noised to kRefT, ahead of the generated rows
     std::vector<uint8_t> text_tags_;
-    std::vector<float> grid_; // the schedule's sigmas, the terminal 0 last
+    std::vector<float> grid_;             // the distilled schedule's sigmas, the terminal 0 last
+    mutable std::vector<float> schedule_; // the schedule sigmas() made last, which step() reads its next level from
     std::unique_ptr<models::H3> dit_;
     std::unique_ptr<models::H3Vae> vae_;
     std::unique_ptr<models::QwenVision> vision_;

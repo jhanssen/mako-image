@@ -144,7 +144,14 @@ came out a few percent off.
   per channel by the release's mean and deviation. Weights F16 (the repack's, or the release's F32 rounded).
 - Schedule: the release's grid 1, 0.9675, 0.8875, 0.75, 0.5328, 0.2320, 0, each sigma rounded through its float
   timestep 1 - sigma as the pipeline does; Euler in the velocity form (the transformer's velocity points at the
-  data, the engine's loop steps along the noise, so the step negates it); no guidance, no other step count.
+  data, the engine's loop steps along the noise, so the step negates it); no guidance.
+  Other step counts interpolate the grid linearly in its index (ComfyUI's view of this model through its model
+  sampling): a step inside one grid interval takes that interval's head, a step across several the blend of their
+  heads weighted by the sigma each covers (`models::H3::blend_heads`; the grid's nearest points to the step's two
+  levels bound it, as ComfyUI picks them). Against ComfyUI's bf16 run at 1, 3, 5 and 10 steps the velocities are
+  3-5% apart at the grid's levels and up to 8% at levels between them, where no single head comes closer, so the
+  choice agrees and the rest is precision. The model was distilled for its six steps only; other counts are off
+  that design and judged by eye.
 - Memory: the text encoder (49 GB) and the transformer (40 GB pruned, 66 GB as released) each in their own runtime;
   the transformer loads on first use. Where the two do not fit together with room (1.35 x their files against the
   machine's memory) they take turns: the text encoder (and the vision tower) is freed when the transformer loads

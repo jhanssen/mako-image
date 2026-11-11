@@ -360,7 +360,7 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
         return fail(400, std::format("size: {} makes at most {} megapixels", model.name,
                                      double(image::Engine::max_pixels(model.family)) / 1e6),
                     "invalid_request_error");
-    const uint32_t fixed = image::Engine::fixed_steps(model.family);
+    const bool fixed = image::Engine::fixed_schedule(model.family);
     std::optional<float> guidance = model.guidance;
     if (body.contains("negative_prompt") && !body["negative_prompt"].is_null()) {
         if (!body["negative_prompt"].is_string())
@@ -408,10 +408,9 @@ void ImageServer::Impl::images(const httplib::Request& req, httplib::Response& r
             return fail(400, "steps must be a whole number from 0 (the model's) to 100", "invalid_request_error");
         steps = uint32_t(v.get_number());
     }
-    if (fixed && ((steps && steps != fixed) || negative || (guidance && *guidance != 1.0f) ||
-                  (sampler && *sampler != image::Sampler::euler)))
-        return fail(400, std::format("{} samples in {} Euler steps on its own schedule, without guidance: no steps "
-                                     "(or {}), negative_prompt, guidance_scale or sampler", model.name, fixed, fixed),
+    if (fixed && (negative || (guidance && *guidance != 1.0f) || (sampler && *sampler != image::Sampler::euler)))
+        return fail(400, std::format("{} samples with Euler on its own schedule, without guidance: no negative_prompt, "
+                                     "guidance_scale or sampler", model.name),
                     "invalid_request_error");
     // The smallest canvas a model that generates larger than asked uses.
     std::optional<uint32_t> min_area = model.min_area;
@@ -706,8 +705,8 @@ void ImageServer::Impl::image_model_list(httplib::Response& res)
             data += R"(,"control":true)";
         if (image::Engine::takes_references(m.family))
             data += R"(,"references":true)";
-        if (const uint32_t fixed = image::Engine::fixed_steps(m.family))
-            data += std::format(R"(,"fixed_steps":{})", fixed);
+        if (image::Engine::fixed_schedule(m.family))
+            data += R"(,"fixed_schedule":true)";
         if (m.min_area)
             data += std::format(R"(,"min_generation_area":{})", *m.min_area);
         std::string l;

@@ -71,9 +71,9 @@ public:
     static bool encodes_images(const std::string& family) { return family == "MOSS-Image"; }
     // Whether the family takes a control adapter (Options::control).
     static bool takes_control(const std::string& family) { return family == "MOSS-Image"; }
-    // The step count of a family that samples on a fixed schedule (no other count, no terminal stretch, Euler
-    // only, no guidance); 0: any.
-    static uint32_t fixed_steps(const std::string& family) { return family == "MiniMax-H3-Image" ? 6 : 0; }
+    // Whether a family samples on its own schedule only: Euler, no guidance, no terminal stretch (the step count
+    // is free: MiniMax-H3-Image's distilled grid is interpolated to it).
+    static bool fixed_schedule(const std::string& family) { return family == "MiniMax-H3-Image"; }
     // Whether a family generates on a canvas of at least Request::min_area pixels and resizes to the size asked.
     static bool generates_on_canvas(const std::string& family) { return family == "MiniMax-H3-Image"; }
     // Whether a family takes reference images (Request::references).

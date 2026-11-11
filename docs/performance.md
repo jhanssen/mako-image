@@ -35,6 +35,11 @@ pixels, 261 tokens each) in about a second; the Lanczos resize to 1024x1024 is o
 with the rows: 4096x4096 is 16384 rows, about four times a step. A reference's rows add to every step like
 generated rows (an edit at 1024 + 1024 rows costs what a 2048-row generation does). Not measured yet: LoRAs.
 
+Other step counts (the grid interpolated, ComfyUI's rule for the heads) cost a step each: 1024x1024 at its own size
+(1024 rows, the repack, one process from cold) 3 steps 15.0 s, 6 steps 18.0 s, 12 steps 24.4 s, about 1.05 s a
+step after the 12 s of loading and the text encoder. By eye on one prompt and seed: 3 steps clean but softer, 12
+steps crisper with harder texture than 6, which is what the heads were distilled for.
+
 The release's shards (66 GB BF16) with the same text encoder do not fit this machine together with room, so the
 engine takes turns (the text encoder freed when the transformer loads, loaded again for the next prompt):
 

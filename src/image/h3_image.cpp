@@ -313,11 +313,34 @@ std::vector<float> H3Image::step(std::span<const float> latents, float sigma, ui
     const uint32_t lh = l.h, lw = l.w, ph = lh / 2, pw = lw / 2;
     if (latents.size() != uint64_t(lh) * lw * lat_)
         throw std::runtime_error(std::format("latents must be [h * w][{}]", lat_));
-    // The step's head: the level's place on the grid.
-    const auto at = std::ranges::find(grid_, sigma);
-    if (at == grid_.end() || at + 1 == grid_.end())
+    // The step's head: the grid interval it crosses, or across several (fewer steps than the grid's) their heads
+    // blended by the sigma each covers; the grid's nearest points to the step's two levels bound it. The step's
+    // next level comes from the schedule sigmas() made (the grid itself when none was asked).
+    const auto& sched = std::ranges::find(schedule_, sigma) != schedule_.end() ? schedule_ : grid_;
+    const auto at = std::ranges::find(sched, sigma);
+    if (at == sched.end() || at + 1 == sched.end())
         throw std::runtime_error(std::format("sigma {} is not a step of the schedule", sigma));
-    const uint32_t head = uint32_t(at - grid_.begin());
+    const uint32_t n = default_steps();
+    auto nearest = [&](float s) {
+        uint32_t best = 0;
+        for (uint32_t k = 1; k <= n; ++k)
+            if (std::abs(grid_[k] - s) < std::abs(grid_[best] - s))
+                best = k;
+        return best;
+    };
+    const uint32_t start = std::min(nearest(sigma), n - 1), stop = std::max(nearest(*(at + 1)), start + 1);
+    uint32_t head = start;
+    if (stop > start + 1) {
+        std::vector<float> w(n, 0.0f);
+        float sum = 0;
+        for (uint32_t k = start; k < stop; ++k) {
+            w[k] = grid_[k] - grid_[k + 1];
+            sum += w[k];
+        }
+        for (float& v : w)
+            v /= sum;
+        head = dit_->blend_heads(w);
+    }
     // The latents as rows of 2x2 patches ([c][dy][dx]) after the references'.
     std::vector<float> video(cond_rows_);
     video.resize(uint64_t(C + N) * P);
@@ -344,11 +367,26 @@ std::vector<float> H3Image::step(std::span<const float> latents, float sigma, ui
 std::vector<float> H3Image::sigmas(uint32_t steps, uint32_t, std::optional<float> terminal) const
 {
     if (terminal && *terminal != 0.0f)
-        throw std::runtime_error("MiniMax-H3-Image: the schedule is fixed (no terminal)");
-    if (steps != default_steps())
-        throw std::runtime_error(std::format("MiniMax-H3-Image samples in {} steps, one output head each, not {}",
-                                             default_steps(), steps));
-    return grid_;
+        throw std::runtime_error("MiniMax-H3-Image: the schedule ends at 0 (no terminal)");
+    const uint32_t n = default_steps();
+    if (!steps)
+        steps = n;
+    std::vector<float> s;
+    if (steps == n) {
+        s = grid_;
+    } else {
+        // The distilled grid interpolated linearly in its index (as ComfyUI's samplers see this model): a step
+        // inside one of its intervals takes that interval's head, a step across several a blend of theirs.
+        for (uint32_t i = 0; i <= steps; ++i) {
+            const double pos = double(n) * i / steps;
+            const uint32_t k = std::min(uint32_t(pos), n - 1);
+            const double f = pos - k;
+            s.push_back(float(grid_[k] * (1.0 - f) + grid_[k + 1] * f));
+        }
+        s.back() = 0.0f;
+    }
+    schedule_ = s;
+    return s;
 }
 
 std::vector<float> H3Image::decode(std::span<const float> latents, uint32_t h, uint32_t w)

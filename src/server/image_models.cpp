@@ -177,11 +177,10 @@ ImageModel load_image_model(const std::string& dir, const std::string& name)
         throw std::runtime_error(std::format("{}: {} has no blocks to skip", name, m.family));
     if (m.min_area && !image::Engine::generates_on_canvas(m.family))
         throw std::runtime_error(std::format("{}: {} generates at the size asked for (no min_area)", name, m.family));
-    if (const uint32_t fixed = image::Engine::fixed_steps(m.family);
-        fixed && ((m.steps && m.steps != fixed) || m.terminal || (m.guidance && *m.guidance != 1.0f) ||
-                  (m.sampler && *m.sampler != image::Sampler::euler)))
-        throw std::runtime_error(std::format("{}: {} samples in {} Euler steps on its own schedule, without guidance",
-                                             name, m.family, fixed));
+    if (image::Engine::fixed_schedule(m.family) &&
+        (m.terminal || (m.guidance && *m.guidance != 1.0f) || (m.sampler && *m.sampler != image::Sampler::euler)))
+        throw std::runtime_error(std::format("{}: {} samples with Euler on its own schedule, without guidance (no "
+                                             "terminal, guidance or sampler)", name, m.family));
     return m;
 }
 

@@ -51,13 +51,13 @@ void image_model_checks()
     std::ofstream(root / "e" / "vae.safetensors") << "v";
     std::ofstream(root / "e" / "mako.json") << R"({"vae": "vae.safetensors", "min_area": 0})";
     fs::create_directories(root / "f");
-    std::ofstream(root / "f" / "mako.json") << R"({"model": "../e", "steps": 4})";
+    std::ofstream(root / "f" / "mako.json") << R"({"model": "../e", "guidance": 1.5})";
     fs::create_directories(root / "g");
     std::ofstream(root / "g" / "mako.json") << R"({"model": "../a", "min_area": 1024})";
     const auto list = mako::server::image_models(root.string());
     check(list.size() == 3 && list[0].name == "a" && list[1].name == "b" && list[2].name == "e",
           "image models: the directories holding one, bad mako.json files (a missing LoRA, an unmerged LoRA for a model "
-          "that merges them, a step count on a fixed schedule, a canvas area on a model without one) left out");
+          "that merges them, guidance on a model without it, a canvas area on a model without one) left out");
     if (list.size() == 3)
         check(list[2].family == "MiniMax-H3-Image" && list[2].min_area == 0u &&
                   list[2].options.vae == fs::absolute(root / "e" / "vae.safetensors").lexically_normal().string() &&

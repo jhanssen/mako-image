@@ -77,7 +77,7 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   read on each request: models and LoRAs added later count.
 - `GET /v1/images/models` lists the models: `id`, `family` (which model it is), `description`, `prompting`,
   `default`, `loaded`, `steps`, `guidance`, `sampler` and `skip_blocks` where set, `image_to_image`, `control` and
-  `references` when it takes a starting image, control maps or reference images, `fixed_steps` and
+  `references` when it takes a starting image, control maps or reference images, `fixed_schedule` and
   `min_generation_area` where the model has them, and the default `loras` with their scales (and `merge` where set).
 - MOSS-Image also takes a layout as its prompt: compact JSON with a caption for the whole image and a box per
   character, object or text (`{"summary": {"caption": ...}, "items": [{"label": "character", "caption": ...,
@@ -108,9 +108,11 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   prompt when the request gives none, that pass skipping block 22 (`skip_blocks`). Anima (not Turbo) is guided by
   default against its model card's negative prompt without the score tags the card advises against for it ("worst
   quality, low quality, artist name, blurry, jpeg artifacts, chromatic aberration"), SDXL against "bad quality, worst
-  quality, worst detail, sketch, censor" (WAI-illustrious's recommended one). MiniMax-H3-Image is distilled to its
-  six steps with one output head each and no guidance: `steps` other than 6 (or 0), `negative_prompt`, `guidance_scale`
-  other than 1, `sampler` other than `euler` and `terminal` are refused. Its extensions: `references`, an array of
+  quality, worst detail, sketch, censor" (WAI-illustrious's recommended one). MiniMax-H3-Image is distilled to a
+  six-step grid with one output head each and no guidance: `negative_prompt`, `guidance_scale` other than 1,
+  `sampler` other than `euler` and `terminal` are refused; other `steps` interpolate its grid (as ComfyUI samples it:
+  a step inside one grid interval takes that interval's head, a step across several the blend of theirs weighted by
+  the sigma each covers), off the schedule it was distilled for, so judge the result by eye. Its extensions: `references`, an array of
   image files in base64 (or `data:` URLs; up to 16, 32 pixels a side to 16 megapixels each) the prompt names in that
   order as `<Picture 1>`, `<Picture 2>`, ... (an edit: say what to keep, what to change, then describe the whole
   target image), each taken at its own size (resized only when its short edge is outside 1024 to 2048 pixels), and

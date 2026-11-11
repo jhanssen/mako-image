@@ -212,6 +212,44 @@ int main(int argc, char** argv)
         for (size_t i = 0; same && i < got.size(); ++i)
             same = got[i] == want[i] && (i + 1 == got.size() || 1.0f - got[i] == ts[i]);
         check(same, std::format("{} sigmas, bit-equal to the reference's grid and timesteps", got.size()));
+    } else if (mode == "steps") {
+        // Schedules of other lengths than the grid's, against ComfyUI's run of the pruned transformer at every level
+        // on the trajectory's rows from the grid point the level falls in (comfy_h3_image_steps.py: its own off-grid
+        // rule, the heads of the intervals a step spans blended by the sigma each covers; no other reference samples
+        // this model off its grid).
+        if (!m.contains("comfy_steps")) {
+            std::println("no comfy_steps in the manifest (comfy_h3_image_steps.py not run): skipped");
+            return 77;
+        }
+        engine.begin(read_f32(ref / "text_embeds.f32"), lat, lat);
+        const auto grid = floats_of(m["sigmas"]);
+        const uint32_t n = uint32_t(grid.size() - 1);
+        for (const auto& [count, sched] : m["comfy_steps"].get_object()) {
+            const uint32_t steps = uint32_t(std::stoul(count));
+            const auto want_s = floats_of(sched);
+            const auto sig = engine.sigmas(steps, N, std::nullopt);
+            bool same = sig.size() == want_s.size();
+            for (size_t i = 0; same && i < sig.size(); ++i)
+                same = std::abs(sig[i] - want_s[i]) <= 1e-6f;
+            check(same, std::format("{} steps: {} sigmas as ComfyUI's interpolation of the grid", steps, sig.size()));
+            if (!same)
+                continue;
+            for (uint32_t i = 0; i < steps; ++i) {
+                const auto rows = read_f32(ref / std::format("step{}_rows.f32", std::min(n * i / steps, n - 1)));
+                const auto vel = engine.step(unpacked(rows, lat, lat), sig[i]);
+                std::vector<float> want = read_f32(ref / std::format("comfy_steps{}_s{}_pred.f32", steps, i));
+                for (float& v : want)
+                    v = -v;
+                // ComfyUI runs in bf16: 3-5% apart at the grid's levels, up to 8% at a level between them (no single
+                // head of the bank comes closer there, so the head choice agrees and the rest is precision).
+                compare(std::format("{} steps, level {} (sigma {:.4f} -> {:.4f}): velocity against ComfyUI's", steps, i,
+                                    sig[i], sig[i + 1]),
+                        packed(vel, lat, lat), want, 96, 0.1);
+            }
+        }
+        // The grid's own six steps go through the same path: head i, no blend.
+        const auto six = engine.sigmas(engine.default_steps(), N, std::nullopt);
+        check(six == grid, "the grid's step count gives the grid");
     } else if (mode == "text") {
         const auto got = engine.prompt_embeddings(prompt);
         compare("text embeddings (layer 50)", got, read_f32(ref / "text_embeds.f32"), H3::kText, 0.03);
