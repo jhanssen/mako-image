@@ -117,7 +117,9 @@ curl -s localhost:8082/v1/images/generations -H 'Content-Type: application/json'
   order as `<Picture 1>`, `<Picture 2>`, ... (an edit: say what to keep, what to change, then describe the whole
   target image), each taken at its own size (resized only when its short edge is outside 1024 to 2048 pixels), and
   `min_generation_area`: the model generates on a canvas of at least this many pixels (default 4194304, 2048x2048,
-  as released, where it was trained; 4 to 16 megapixels is its working range) at the aspect ratio asked for and
+  as released, where it was trained; 4 to 20 megapixels is its working range, best around 16: the card's 16 MP sizes
+  are 4096x4096, 4736x3552, 5024x3360, 5472x3072, 6272x2688 and their portrait swaps, each side sqrt(16777216 x
+  ratio) rounded to a multiple of 32) at the aspect ratio asked for and
   resizes the image to `size` (Lanczos); `0` generates at `size` itself (a 512x512 draft in 13 s instead of 37).
   The PNG records the canvas (`Canvas`) and the number of references.
 - One model is in memory at a time, loaded by the first request for it; a request for another model or other LoRAs
