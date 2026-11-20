@@ -26,9 +26,10 @@ struct AttnArgs {
     float scale;
     uint32_t limits = 0; // 1: per-query key limits in buffer 5
 };
-struct LnArgs {
+struct LayerNormArgs {
     uint32_t n;
     float eps;
+    uint32_t ystride = 0;
 };
 struct UpArgs {
     uint32_t h, w, c, c_out, ft, repeats;
@@ -426,7 +427,7 @@ void Sdxl::lora_merged()
 void Sdxl::ln(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, const Tensor& g, const Tensor& b, MTL::Buffer* y,
               uint32_t rows, uint32_t n)
 {
-    const LnArgs a{n, 1e-5f};
+    const LayerNormArgs a{n, 1e-5f};
     enc->setComputePipelineState(pso("layer_norm"));
     enc->setBuffer(x, 0, 0);
     enc->setBuffer(g.buf, g.off, 1);
