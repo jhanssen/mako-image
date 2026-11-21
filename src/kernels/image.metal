@@ -330,116 +330,6 @@ kernel void layer_mix(device const float* x [[buffer(0)]], device float* out [[b
     out[uint64_t(gid.y) * a.n + gid.x] = acc;
 }
 
-// Qwen3.5's text layers: the gated delta rule's input and output, and the gated attention's heads.
-
-struct GdnConvArgs {
-    uint channels;
-    uint taps; // the last one multiplies the current token (at most 8)
-    uint tokens;
-};
-
-// Causal depthwise convolution over each channel's tokens (zeros before the first), then SiLU: x, y [tokens][channels],
-// w [channels][taps]. One thread per channel.
-kernel void gdn_conv(device const float* x [[buffer(0)]], device const float* w [[buffer(1)]],
-                     device float* y [[buffer(2)]], constant GdnConvArgs& a [[buffer(3)]],
-                     uint c [[thread_position_in_grid]])
-{
-    if (c >= a.channels)
-        return;
-    device const float* wc = w + uint64_t(c) * a.taps;
-    float hist[8] = {};
-    for (uint t = 0; t < a.tokens; ++t) {
-        const float xc = x[uint64_t(t) * a.channels + c];
-        for (uint j = 0; j + 1 < a.taps; ++j)
-            hist[j] = hist[j + 1];
-        hist[a.taps - 1] = xc;
-        float acc = 0.0f;
-        for (uint j = 0; j < a.taps; ++j)
-            acc += wc[j] * hist[j];
-        y[uint64_t(t) * a.channels + c] = acc / (1.0f + exp(-acc));
-    }
-}
-
-struct GdnPrepArgs {
-    uint k_heads, v_heads; // of 128: each key head serves v_heads / k_heads value heads
-    uint conv_width;       // a conv row: q (k_heads), k (k_heads), v (v_heads)
-    float eps;             // of the l2 norm: x / sqrt(sum x^2 + eps)
-};
-
-// For each (token, value head) from the convolved q | k | v and the b | a projections: q and k l2-normed and repeated
-// to the value heads, v, the decay g = -exp(A_log) softplus(a + dt_bias) on every channel, beta = sigmoid(b), as the
-// delta-rule scan reads them ([tokens][v_heads * 128]; beta [tokens][v_heads]). Threadgroups (v_heads, tokens) of 128.
-kernel void gdn_prep(device const float* conv [[buffer(0)]], device const float* ba [[buffer(1)]],
-                     device const float* a_log [[buffer(2)]], device const float* dt_bias [[buffer(3)]],
-                     device float* q [[buffer(4)]], device float* k [[buffer(5)]], device float* v [[buffer(6)]],
-                     device float* g [[buffer(7)]], device float* beta [[buffer(8)]],
-                     constant GdnPrepArgs& a [[buffer(9)]], uint2 tg [[threadgroup_position_in_grid]],
-                     uint i [[thread_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]],
-                     uint sg [[simdgroup_index_in_threadgroup]])
-{
-    threadgroup float part[2][4];
-    const uint h = tg.x, t = tg.y, kh = h / (a.v_heads / a.k_heads), kw = a.k_heads * 128, vw = a.v_heads * 128;
-    device const float* row = conv + uint64_t(t) * a.conv_width;
-    const float qv = row[kh * 128 + i], kv = row[kw + kh * 128 + i];
-    const float sq = simd_sum(qv * qv), sk = simd_sum(kv * kv);
-    if (lane == 0) {
-        part[0][sg] = sq;
-        part[1][sg] = sk;
-    }
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    const float nq = part[0][0] + part[0][1] + part[0][2] + part[0][3];
-    const float nk = part[1][0] + part[1][1] + part[1][2] + part[1][3];
-    const uint64_t o = uint64_t(t) * vw + h * 128 + i;
-    q[o] = qv * rsqrt(nq + a.eps);
-    k[o] = kv * rsqrt(nk + a.eps);
-    v[o] = row[2 * kw + h * 128 + i];
-    device const float* bar = ba + uint64_t(t) * 2 * a.v_heads;
-    const float x = bar[a.v_heads + h] + dt_bias[h];
-    const float sp = x > 20.0f ? x : log(1.0f + exp(x));
-    g[o] = -exp(a_log[h]) * sp;
-    if (i == 0)
-        beta[uint64_t(t) * a.v_heads + h] = 1.0f / (1.0f + exp(-bar[h]));
-}
-
-struct GatedRmsArgs {
-    uint heads; // of 128
-    float eps;
-};
-
-// x = rms_norm(x) * w * silu(z) over each 128-wide head of each row. Threadgroups (heads, rows) of 128.
-kernel void gated_rms(device float* x [[buffer(0)]], device const float* z [[buffer(1)]],
-                      device const float* w [[buffer(2)]], constant GatedRmsArgs& a [[buffer(3)]],
-                      uint2 tg [[threadgroup_position_in_grid]], uint i [[thread_index_in_threadgroup]],
-                      uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]])
-{
-    threadgroup float part[4];
-    const uint64_t o = uint64_t(tg.y) * a.heads * 128 + tg.x * 128 + i;
-    const float v = x[o], s = simd_sum(v * v);
-    if (lane == 0)
-        part[sg] = s;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    const float inv = rsqrt((part[0] + part[1] + part[2] + part[3]) / 128.0f + a.eps);
-    const float zz = z[o];
-    x[o] = v * inv * w[i] * (zz / (1.0f + exp(-zz)));
-}
-
-struct GateHeadsArgs {
-    uint heads, dim;
-    uint ld, col0; // the gate of head h at src[t][col0 + h * stride]
-    uint stride;
-};
-
-// x[t][h * dim + d] *= sigmoid(src[t][col0 + h * stride + d]). Grid (dim, heads, rows).
-kernel void gate_heads(device float* x [[buffer(0)]], device const float* src [[buffer(1)]],
-                       constant GateHeadsArgs& a [[buffer(2)]], uint3 gid [[thread_position_in_grid]])
-{
-    const uint d = gid.x, h = gid.y, t = gid.z;
-    if (d >= a.dim || h >= a.heads)
-        return;
-    const float gv = src[uint64_t(t) * a.ld + a.col0 + h * a.stride + d];
-    x[(uint64_t(t) * a.heads + h) * a.dim + d] *= 1.0f / (1.0f + exp(-gv));
-}
-
 // MOSS-Image: the blocks' modulation from the step's shared vector and the gated FFN activation.
 
 struct MossModArgs {
@@ -501,7 +391,6 @@ static float erf_fit(float x)
                                          t * (-1.13520398f + t * (1.48851587f + t * (-0.82215223f + t * 0.17087277f)))))))));
     return x >= 0.0f ? 1.0f - r : r - 1.0f;
 }
-
 
 // SDXL: CLIP's and the UNet's layer norms and activations.
 

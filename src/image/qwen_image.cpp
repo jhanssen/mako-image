@@ -1,6 +1,7 @@
 #include "image/qwen_image.hpp"
 
 #include "log/log.hpp"
+#include "kernels/args.h"
 
 #include <algorithm>
 #include <cmath>
@@ -13,21 +14,13 @@ namespace mako::image {
 
 namespace {
 
-struct HeadsArgs {
-    uint32_t rows, ld, col0, dim, n_pad, row0, rope;
-};
+using kernels::HeadsArgs;
 struct ModArgs {
     uint32_t n;
     float eps;
     uint32_t split, mod_stride, mod_off;
 };
-struct HeadRowsArgs {
-    uint32_t dim, src_pad, dst_pad, rows;
-};
-struct HeadsNormArgs {
-    uint32_t ld, col0, dim, n_pad, row0, rope;
-    float eps;
-};
+using kernels::HeadRowsArgs;
 
 // Pairs i of the rotary angle table for (frame, height, width) positions: 8 pairs on the frame axis, then 28 each on
 // height and width (axes 16 / 56 / 56 of the 128 dims), theta 10000.
@@ -389,23 +382,9 @@ std::vector<float> QwenImage::step(std::span<const float> latents, float sigma, 
         dispatch(enc, "ln_modulate", {x, mod, xn}, &ma, sizeof(ma), MTL::Size(T, 1, 1), MTL::Size(256, 1, 1), false);
         proj(enc, B.qkv, xn, 0, qkv, 0, Tg);
         // q and k RMS-normed per head and rotated (the table's rows from this step's first token on), v as it is.
-        HeadsNormArgs hn{3 * D, 0, kHeadDim, q_pad, 0, 2, kEps};
-        enc->setComputePipelineState(pso("heads_norm_half"));
-        enc->setBuffer(qkv, 0, 0);
-        enc->setBuffer(cs, uint64_t(row0) * kHeadDim / 2 * 8, 1);
-        enc->setBuffer(qh, 0, 2);
-        enc->setBuffer(B.norm_q.buf, B.norm_q.off, 3);
-        enc->setBytes(&hn, sizeof(hn), 4);
-        enc->dispatchThreadgroups(MTL::Size(T, kHeads, 1), MTL::Size(kHeadDim / 2, 1, 1));
-        after(enc, "heads_norm_half");
-        hn.col0 = D;
-        hn.n_pad = k_pad;
-        hn.row0 = row0;
-        enc->setBuffer(kh, 0, 2);
-        enc->setBuffer(B.norm_k.buf, B.norm_k.off, 3);
-        enc->setBytes(&hn, sizeof(hn), 4);
-        enc->dispatchThreadgroups(MTL::Size(T, kHeads, 1), MTL::Size(kHeadDim / 2, 1, 1));
-        after(enc, "heads_norm_half");
+        const uint64_t cs_off = uint64_t(row0) * kHeadDim / 2 * 8;
+        heads_norm(enc, qkv, 3 * D, 0, kHeads, T, q_pad, cs, cs_off, 2, B.norm_q, kEps, 0, qh);
+        heads_norm(enc, qkv, 3 * D, D, kHeads, T, k_pad, cs, cs_off, 2, B.norm_k, kEps, row0, kh);
         HeadsArgs ha{T, 3 * D, 2 * D, kHeadDim, k_pad, row0, 0};
         enc->setComputePipelineState(pso("heads_half"));
         enc->setBuffer(qkv, 0, 0);

@@ -2,6 +2,7 @@
 
 #include "log/log.hpp"
 #include "gguf/read_pool.hpp"
+#include "kernels/args.h"
 
 #include <algorithm>
 #include <cmath>
@@ -17,20 +18,7 @@ namespace {
 
 namespace fs = std::filesystem;
 
-struct LnAffineArgs {
-    uint32_t n;
-    float eps;
-};
-struct HeadsPartialArgs {
-    uint32_t ld, col0, stride, dim, rot, n_pad;
-    float eps;
-    uint32_t mapped = 0; // 1: rows through a row map in buffer 5
-};
-struct AttnArgs {
-    uint32_t n_q, q_pad, n_k, k_pad, heads, kv_heads, q_pos0, block, width;
-    float scale;
-    uint32_t limits = 0; // 1: per-query key limits in buffer 5
-};
+using kernels::LnAffineArgs;
 
 safetensors::Files open_files(const std::string& path)
 {
@@ -345,27 +333,13 @@ void Anima::begin(std::span<const float> prompt, uint32_t h, uint32_t w, uint32_
     MTL::ComputeCommandEncoder* enc = encoder(cb, 0, -1);
     auto heads64 = [&](MTL::Buffer* src, uint32_t ld, uint32_t col0, uint32_t n, uint32_t pad, MTL::Buffer* cs,
                        const Tensor* norm, MTL::Buffer* dst) {
-        const HeadsPartialArgs a{ld, col0, D, D, cs ? D : 0, pad, norm ? kEps : 0.0f};
-        enc->setComputePipelineState(pso("heads_partial"));
-        enc->setBuffer(src, 0, 0);
-        enc->setBuffer(cs ? cs : src, 0, 1);
-        enc->setBuffer(dst, 0, 2);
-        enc->setBuffer(norm ? norm->buf : src, norm ? norm->off : 0, 3);
-        enc->setBytes(&a, sizeof(a), 4);
-        enc->setBuffer(src, 0, 5); // the kernel's row map, unused here
-        enc->dispatchThreadgroups(MTL::Size(n, H, 1), MTL::Size(D, 1, 1));
-        after(enc, "heads_partial");
+        heads_partial(enc, src, ld, col0, D, D, cs ? D : 0, H, n, pad, cs, norm, kEps, dst);
         if (pad > n) {
             const uint32_t c[4] = {D, pad, n, 0};
             dispatch(enc, "heads_clear", {dst}, c, sizeof(c), MTL::Size(D, pad - n, H), MTL::Size(64, 1, 1));
         }
     };
-    auto attend = [&](uint32_t nk, uint32_t k_pad) {
-        const AttnArgs a{M, mq_pad, nk, k_pad, H, H, 0, 0, H * D, 1.0f / std::sqrt(float(D))};
-        enc->setBuffer(qh, 0, 5); // the kernel's key limits, unused here
-        dispatch(enc, "flash_attn_coop_64_32", {qh, kh, vh, att}, &a, sizeof(a), MTL::Size(mq_pad / kAttnRows, H, 1),
-                 MTL::Size(128, 1, 1), false);
-    };
+    auto attend = [&](uint32_t nk, uint32_t k_pad) { attention(enc, qh, kh, vh, att, M, mq_pad, nk, k_pad, H, H, 0, 0, D); };
     for (const AdapterBlock& A : adapter_) {
         norm(enc, x, &A.norm_self, xn, M, E, E, kEps);
         proj(enc, A.self.q, xn, 0, qkv, 0, M);

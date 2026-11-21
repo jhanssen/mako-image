@@ -2,6 +2,7 @@
 
 #include "gguf/read_pool.hpp"
 #include "log/log.hpp"
+#include "kernels/args.h"
 
 #include <algorithm>
 #include <cctype>
@@ -18,25 +19,13 @@ namespace {
 
 namespace fs = std::filesystem;
 
-struct HeadsArgs {
-    uint32_t rows, ld, col0, dim, n_pad, row0, rope;
-};
-struct AttnArgs {
-    uint32_t n_q, q_pad, n_k, k_pad, heads, kv_heads, q_pos0, block, width;
-    float scale;
-    uint32_t limits = 0; // 1: per-query key limits in buffer 5
-};
-struct LayerNormArgs {
-    uint32_t n;
-    float eps;
-    uint32_t ystride = 0;
-};
+using kernels::HeadsArgs;
+using kernels::LayerNormArgs;
 struct UpArgs {
     uint32_t h, w, c, c_out, ft, repeats;
 };
 
 constexpr uint32_t kD = 64;        // attention heads' width, text encoders' and UNet's
-constexpr uint32_t kQRows = 64;    // query rows a threadgroup of the attention kernel
 constexpr uint32_t kCtxWidth = 2048, kPooled = 1280, kAdded = 2816, kTokens = 77;
 constexpr const char* kUnet = "model.diffusion_model.";
 constexpr const char* kClipL = "conditioner.embedders.0.transformer.text_model.";
@@ -452,11 +441,7 @@ void Sdxl::heads64(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* x, uint32_t ld
 void Sdxl::attend64(MTL::ComputeCommandEncoder*& enc, MTL::Buffer* q, MTL::Buffer* k, MTL::Buffer* v, MTL::Buffer* o,
                     uint32_t n_q, uint32_t n_k, uint32_t n_heads, uint32_t block)
 {
-    const uint32_t q_pad = round_up(n_q, kQRows), k_pad = round_up(n_k, 128);
-    const AttnArgs a{n_q, q_pad, n_k, k_pad, n_heads, n_heads, 0, block, n_heads * kD, 1.0f / std::sqrt(float(kD))};
-    enc->setBuffer(q, 0, 5); // the kernel's key limits, unused here
-    dispatch(enc, "flash_attn_coop_64_32", {q, k, v, o}, &a, sizeof(a), MTL::Size(q_pad / kQRows, n_heads, 1),
-             MTL::Size(128, 1, 1), false);
+    attention(enc, q, k, v, o, n_q, round_up(n_q, kAttnRows), n_k, round_up(n_k, 128), n_heads, n_heads, 0, block, kD);
 }
 
 std::vector<float> Sdxl::encode_clip(int which, std::span<const int32_t> ids, std::vector<float>* pooled)
@@ -465,7 +450,7 @@ std::vector<float> Sdxl::encode_clip(int which, std::span<const int32_t> ids, st
     const uint32_t T = uint32_t(ids.size()), E = C.E, H = E / kD, nff = uint32_t(C.layers.front().fc1.dims[1]);
     if (T != kTokens)
         throw std::runtime_error("a text encoder's chunk is 77 tokens");
-    const uint32_t q_pad = round_up(T, kQRows), k_pad = round_up(T, 128);
+    const uint32_t q_pad = round_up(T, kAttnRows), k_pad = round_up(T, 128);
     MTL::Buffer* x = scratch("c_x", uint64_t(T) * E * 4);
     MTL::Buffer* xn = scratch("c_xn", uint64_t(T) * E * 4);
     MTL::Buffer* qkv = scratch("c_qkv", uint64_t(T) * 3 * E * 4);
@@ -749,7 +734,7 @@ void Sdxl::trans_fwd(MTL::ComputeCommandEncoder*& enc, const Trans& t, MTL::Buff
     // The GEMMs run a multiple of 256 rows (the rest ignored), which keeps them on their largest tiles.
     const uint32_t Ng = n > 256 ? round_up(n, 256) : n;
     const uint32_t nff = uint32_t(t.blocks.front().ff1.dims[1]), inner = nff / 2;
-    const uint32_t q_pad = round_up(n, kQRows), k_pad = round_up(n, 128);
+    const uint32_t q_pad = round_up(n, kAttnRows), k_pad = round_up(n, 128);
     const uint32_t S = ctx_rows_[slot], s_pad = round_up(S, 128);
     MTL::Buffer* xn = scratch("t_xn", uint64_t(Ng) * c * 4);
     MTL::Buffer* hs = scratch("t_h", uint64_t(Ng) * c * 4);
