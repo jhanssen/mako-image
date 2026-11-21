@@ -24,6 +24,7 @@ struct LnAffineArgs {
 struct HeadsPartialArgs {
     uint32_t ld, col0, stride, dim, rot, n_pad;
     float eps;
+    uint32_t mapped = 0; // 1: rows through a row map in buffer 5
 };
 struct AttnArgs {
     uint32_t n_q, q_pad, n_k, k_pad, heads, kv_heads, q_pos0, block, width;
@@ -351,6 +352,7 @@ void Anima::begin(std::span<const float> prompt, uint32_t h, uint32_t w, uint32_
         enc->setBuffer(dst, 0, 2);
         enc->setBuffer(norm ? norm->buf : src, norm ? norm->off : 0, 3);
         enc->setBytes(&a, sizeof(a), 4);
+        enc->setBuffer(src, 0, 5); // the kernel's row map, unused here
         enc->dispatchThreadgroups(MTL::Size(n, H, 1), MTL::Size(D, 1, 1));
         after(enc, "heads_partial");
         if (pad > n) {
